@@ -1,15 +1,22 @@
 #!/usr/bin/python3
-"""Reset the WN8030 MiAuth window by re-binding the I2C driver.
+"""Reset the WN8030 MiAuth window.
 
 The MCU asks for an MiAuth token (0x24, p[6]=0x64 "repeat request auth") on a
 period of its own and stops reporting keys when the window closes.  The token
 lives in the Android devauth TA backed by RPMB; Linux has no way to produce one,
 so answering is not an option and neither is silence - the window still closes.
 
-A full driver rebind resets that window.  It is not free: the unbind path powers
-the MCU down through both regulators and the bind path runs it through the
-bootrom again, so the keyboard is deaf for roughly a second and any Caps Lock
-state the MCU held is gone.  That is why this is a workaround, not a fix.
+Two ways to reset it, and the cheap one is preferred:
+
+  soft reset   write 1 to the driver's soft_reset attribute.  The driver pulses
+               the MCU reset line and waits for the bootrom: about 70 ms, with
+               the supplies untouched and the HID devices left registered.
+  rebind       unbind and bind the I2C driver.  Correct but expensive: the
+               unbind path disables both regulators and the bind path charges
+               them again, so the keyboard is deaf for roughly a second.
+
+The helper uses the soft reset when the attribute exists and falls back to a
+rebind otherwise, so it still works against a kernel that predates it.
 
 Two things this does better than a plain timer:
 
@@ -34,6 +41,7 @@ import time
 
 DRIVER = "/sys/bus/i2c/drivers/nanosic_wn8030"
 DEVICE = "5-004c"
+SOFT_RESET = "/sys/bus/i2c/devices/" + DEVICE + "/soft_reset"
 PERIOD = float(os.environ.get("NANOSIC_REBIND_PERIOD", "50"))
 IDLE = float(os.environ.get("NANOSIC_REBIND_IDLE", "1.5"))
 
@@ -52,6 +60,15 @@ def find_keyboard_event():
         except OSError:
             continue
     return None
+
+
+def soft_reset():
+    try:
+        with open(SOFT_RESET, "w") as handle:
+            handle.write("1")
+        return True
+    except OSError:
+        return False
 
 
 def rebind():
@@ -109,11 +126,16 @@ def main():
                 if now - last_key < IDLE and now - last_reset < PERIOD + 1.0:
                     continue
 
-                if rebind():
-                    log(f"rebind: reset at {time.monotonic() - last_reset:.1f}s "
-                        f"(idle {now - last_key:.1f}s)")
-                    last_reset = time.monotonic()
-                    break
+                if soft_reset():
+                    how = "soft"
+                elif rebind():
+                    how = "rebind"
+                else:
+                    continue
+                log(f"{how}: reset at {time.monotonic() - last_reset:.1f}s "
+                    f"(idle {now - last_key:.1f}s)")
+                last_reset = time.monotonic()
+                break
         except OSError:
             pass
         finally:

@@ -95,6 +95,7 @@ done
 
 source "$here/src/image/package-lock.sh"
 build_common_defaults
+source "$here/src/image/build-kernel-rpms.sh"
 source "$here/src/image/build-control.sh"
 if [[ $control == --status ]]; then build_status; exit; fi
 if [[ $control == --stop ]]; then build_stop; exit; fi

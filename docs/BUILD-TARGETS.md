@@ -15,13 +15,12 @@ no script builds what another one owns, and `--images` is gone.
 ./uke-fedora-builder/build-rpms.sh --output build/rpms
 ```
 
-Produces `kernel-rpms/` holding four subpackages plus a `SHA256SUMS`:
+Produces `kernel-rpms/` holding three subpackages plus a `SHA256SUMS`:
 
 ```
 senemos-uke-linux-kernel-mainline-core-<krel>.aarch64.rpm
 senemos-uke-linux-kernel-mainline-modules-<krel>.aarch64.rpm
 senemos-uke-linux-kernel-mainline-dtbs-<krel>.aarch64.rpm
-senemos-uke-linux-kernel-mainline-boot-<krel>.aarch64.rpm
 ```
 
 Copy the directory to a tablet and install it:
@@ -30,12 +29,16 @@ Copy the directory to a tablet and install it:
 sudo dnf install ./*.rpm
 ```
 
-`boot` is the subpackage that matters.  It carries the Android v4 container and,
-through `%posttrans`, runs `uke-kernel-update`, which writes `boot_a` in one
-guarded transaction.  Installing only `core`/`modules`/`dtbs` updates
-`/usr/lib/modules` and leaves `boot_a` stale.
+That updates `/usr/lib/modules` and nothing else.  `boot_a` is a separate
+artifact and stays as it was: flash the `fedora_boot.img` that
+`build-boot-images.sh` produces for the same kernel release.
 
-Nothing else has to be flashed, and no image is built.
+The kernel `boot` subpackage is not staged.  It carries an Android v4 container
+and a `%posttrans` that calls `uke-kernel-update` to write `boot_a`, which only
+works where that tool is installed - and `build-rootfs.sh` forbids both it and
+`uke-kernel-update` in the userdata image, because that image does not own
+`boot_a`.  Staging it would ship a package whose dependencies cannot be
+satisfied and whose scriptlet never runs.
 
 ## build-boot-images.sh
 
@@ -69,8 +72,8 @@ when the release changes or userspace changes.
 
 | Change | Target | Flash |
 | --- | --- | --- |
-| kernel only, system up to date | `build-rpms.sh` | nothing; `dnf install` writes `boot_a` |
-| kernel only, release unchanged | `build-boot-images.sh` | `boot_a` |
+| kernel only, release unchanged | `build-rpms.sh` + `build-boot-images.sh` | `boot_a` |
+| kernel only, release unchanged, image wanted | `build-boot-images.sh` | `boot_a` |
 | kernel release changed | `build-images.sh` | `boot_a` and `userdata` |
 | userspace or package change | `build-images.sh` | `userdata` |
 

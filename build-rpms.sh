@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build the matched kernel RPM set and stop.
 #
-# Install the result on a running tablet: the boot subpackage's %posttrans runs
-# uke-kernel-update, which writes boot_a in one guarded transaction.  No rootfs
-# and no boot image are built, so this is the fastest way to deliver a kernel
-# change and the only one that does not need fastboot.
+# The set is core, modules and dtbs.  Installing it updates /usr/lib/modules;
+# boot_a is a separate artifact and is replaced by flashing what
+# build-boot-images.sh produces.  No rootfs and no boot image are built here, so
+# this is the fastest way to get a kernel onto the tablet.
 set -Eeuo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -27,13 +27,16 @@ Usage: ./uke-fedora-builder/build-rpms.sh [--output DIR]
        [--rebuild-kernel] [--cross-kernel] [--resume]
        ./uke-fedora-builder/build-rpms.sh --status|--stop --output DIR
 
-Build only the matched kernel RPM set: core, modules, dtbs and boot, plus a
+Build only the matched kernel RPM set: core, modules and dtbs, plus a
 SHA256SUMS.  Copy them to a running tablet and:
 
     sudo dnf install ./*.rpm
 
-The boot subpackage's %posttrans runs uke-kernel-update, which writes boot_a in
-one guarded transaction, so nothing has to be flashed.
+That updates /usr/lib/modules and nothing else.  boot_a is a separate image:
+flash the fedora_boot.img that build-boot-images.sh produces for the same
+kernel release.  The kernel `boot` subpackage is not staged, because the
+scriptlet that would write boot_a from it needs uke-kernel-update, which the
+userdata image does not carry.
 
 On x86_64, --cross-kernel compiles the ARM64 kernel with native Clang.
 The output directory holds kernel-rpms/ and the build log.

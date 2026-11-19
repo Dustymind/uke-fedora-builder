@@ -9,11 +9,16 @@ set -Eeuo pipefail
 _bkr_here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 _bkr_top=$(cd -- "$_bkr_here/../.." && pwd)
 
-# The kernel subpackages that travel together.  boot carries the Android v4
-# container and, via %posttrans, the uke-kernel-update transaction that writes
-# boot_a on a running system; installing the other three alone updates
-# /usr/lib/modules and leaves boot_a stale.
-BUILD_KERNEL_RPM_PARTS=(core modules dtbs boot)
+# The kernel subpackages this deployment installs.
+#
+# The `boot` subpackage is deliberately absent.  It carries an Android v4
+# container and a %posttrans that calls uke-kernel-update to write boot_a, which
+# only works where that tool is installed - and build-rootfs.sh forbids both it
+# and the boot subpackage in the userdata image, because that image is not the
+# image that owns boot_a.  On this deployment boot_a comes from
+# build-boot-a.sh and is flashed, so staging `boot` here would ship a package
+# that cannot satisfy its own dependencies and whose scriptlet never runs.
+BUILD_KERNEL_RPM_PARTS=(core modules dtbs)
 
 # build_kernel_rpms <staging_dir>
 #

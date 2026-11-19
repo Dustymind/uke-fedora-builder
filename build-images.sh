@@ -9,7 +9,6 @@ release=${FEDORA_RELEASE:-44}
 [[ $release =~ ^[0-9]+$ ]] || { printf 'Invalid FEDORA_RELEASE: %s\n' "$release" >&2; exit 1; }
 stock=''
 stock_archive=$here/payload/uke-os3.0.304.0-boot.zst
-output=$workspace/build/fedora${release}-images
 rebuild_kernel=0
 cross_kernel=0
 resume=0
@@ -81,11 +80,12 @@ for profile in "${canonical_profiles[@]}"; do
         build_profiles+=("$profile")
     fi
 done
-build_total=$((12 + 2 * ${#build_profiles[@]}))
-output=$(realpath -m -- "$output")
+source "$here/src/image/build-kernel-rpms.sh"
+source "$here/src/image/build-common.sh"
 source "$here/src/image/build-control.sh"
 if [[ $control == --status ]]; then build_status; exit; fi
 if [[ $control == --stop ]]; then build_stop; exit; fi
+
 profile_valid() {
     local path=$1 profile=$2
     [[ -d $path && ! -L $path && -s $path/SHA256SUMS && -s $path/BUILD-INPUTS.sha256 ]] || return 1
@@ -129,25 +129,25 @@ if [[ $control == --audit-only ]]; then
         || die '--audit-only requires the original --profiles list and output directory'
     exec 9>"$output/.build.lock"
     flock -n 9 || die 'Build already active'
-    jq -e --argjson total "$build_total" \
-        '(.state == "complete" or (.state == "failed" and .stage == "Audit release outputs" and .completed == ($total - 1))) and .total == $total' \
-        "$output/status.json" >/dev/null || die 'This run has no complete set of requested image pairs'
+    # The run has to be one that actually got through its profiles.  A previous
+    # version compared a stage count here, which meant the audit could only run
+    # when the count, the plan and the stored total all still agreed - the same
+    # coupling that turned a finished build into "failed: 13/12".  What the
+    # audit really needs is the pair directories, and it revalidates them below.
     UKE_BUILD_RUN_ID=$(jq -er .run_id "$output/status.json")
     input_hash=$(cat "$output/BUILD-INPUTS.sha256")
-    audit_status=$(mktemp "$output/.status.XXXXXXXX")
-    jq --argjson updated "$(date +%s)" \
-        '.state="failed" | .stage="Audit release outputs" | .completed=(.total - 1) | .updated_unix=$updated' \
-        "$output/status.json" > "$audit_status"
-    chmod 0666 "$audit_status"
-    mv -f -- "$audit_status" "$output/status.json"
+    for profile in "${build_profiles[@]}"; do
+        [[ -d $output/$profile-pair ]] \
+            || die "--audit-only: $profile has no image pair to audit"
+    done
     audit_final
     status_stage=$(mktemp "$output/.status.XXXXXXXX")
     jq --argjson updated "$(date +%s)" \
-        '.state="complete" | .stage="Requested image pairs complete" | .completed=.total | .updated_unix=$updated' \
+        '.state="complete" | .stage="Audit release outputs" | .updated_unix=$updated' \
         "$output/status.json" > "$status_stage"
     chmod 0666 "$status_stage"
     mv -f -- "$status_stage" "$output/status.json"
-    printf 'complete: Requested image pairs complete (%s/%s stages)\n' "$build_total" "$build_total" \
+    printf 'complete: audited %s\n' "${build_profiles[*]}" \
         | tee -a "$output/progress.log"
     exit
 fi
@@ -156,270 +156,23 @@ kernel_epoch=$(jq -er .source_date_epoch \
     "$workspace/senemos-uke-kernel/manifests/linux-${uke_kernel_version}.json")
 [[ $kernel_epoch =~ ^[0-9]+$ ]] || die 'Invalid kernel source date epoch'
 [[ -x $here/build-rootfs.sh && -x $here/build-boot-a.sh ]] || die 'Image builders are missing'
-[[ -x $workspace/uke-linux-hardware-support/xiaomi-uke-firmware/src/verify-oem-304.sh ]] || die 'OEM input verifier is missing'
-"$workspace/uke-linux-hardware-support/xiaomi-uke-firmware/src/verify-oem-304.sh" || die 'Bundled OS3.0.304.0 OEM inputs are incomplete'
-if [[ -n ${UKE_CONTAINER:-} ]]; then
-    [[ $UKE_CONTAINER == docker || $UKE_CONTAINER == podman ]] || die 'UKE_CONTAINER must be docker or podman'
-    command -v "$UKE_CONTAINER" >/dev/null || die "Missing container runtime: $UKE_CONTAINER"
-    container=$UKE_CONTAINER
-elif command -v podman >/dev/null; then container=podman
-elif command -v docker >/dev/null; then container=docker
-else die 'Docker or Podman is required'; fi
-# LeakSanitizer cannot inspect ARM64 test processes under user-mode emulation.
-# Keep AddressSanitizer and UndefinedBehaviorSanitizer enabled in RPM checks.
-sanitizer_env=()
-[[ $(uname -m) == aarch64 ]] || sanitizer_env=(-e ASAN_OPTIONS=detect_leaks=0)
-for command in avbtool jq g++ python3 sha256sum zstd; do command -v "$command" >/dev/null || die "Missing host command: $command"; done
-if ((resume)); then
-    [[ -d $output && ! -L $output ]] || die '--resume requires an existing output directory'
-else
-    [[ ! -e $output && ! -L $output ]] || die 'Output directory already exists; use --resume or choose a new --output'
-    mkdir -p "$output"
-fi
-build_start
-exec > >(tee -a "$output/build.log") 2>&1
-printf '===== UKE BUILD RUN %s =====\n' "$UKE_BUILD_RUN_ID"
-printf 'O82-36 native display: seven fixed OEM modes selected by default\n'
-if [[ -z $stock ]]; then
-    [[ -f $stock_archive && ! -L $stock_archive ]] || die 'Bundled OS3.0.304.0 stock boot template is missing'
-    [[ $(sha256sum "$stock_archive" | cut -d' ' -f1) == d001b8d7a15d088ae24fcb90d85023bd7af2360f8fdb72cf70f4e1b8c6085f1b ]] || die 'Bundled stock boot archive hash mismatch'
-    stock_dir=$(mktemp -d "$output/.stock.XXXXXXXX")
-    stock=$stock_dir/boot.img
-    zstd -q -dc "$stock_archive" > "$stock"
-fi
-[[ -f $stock && ! -L $stock ]] || die 'Stock boot.img is missing'
-[[ $(sha256sum "$stock" | cut -d' ' -f1) == 1eaf4858a7c70bee9b663b485f3192b164738bbdae3edbb986a5419621c8ef30 ]] || die 'Unexpected stock boot.img'
+build_common_defaults
+build_common_host_checks
 if ((cross_kernel)); then
     [[ $(uname -m) == x86_64 ]] || die '--cross-kernel requires an x86_64 host'
 fi
-cache_dir=$here/build/cache
-mkdir -p "$cache_dir/dnf" "$cache_dir/dnf-x86_64" "$cache_dir/ccache" "$cache_dir/ccache-cross"
-build_stage='Prepare reusable build tools'
-build_write_status
-arm_image=$("$here/src/image/ensure-build-image.sh" "$container" linux/arm64)
+build_common_prepare_output
 
-# bash -s reads the build recipe from stdin; keep stdin attached to the container.
-"$container" run --rm -i --network=host --platform linux/arm64 --security-opt label=disable \
-    --label "org.uke-fedora.build-run=$UKE_BUILD_RUN_ID" \
-    "${sanitizer_env[@]}" \
-    -e UKE_REBUILD_KERNEL="$rebuild_kernel" -e UKE_CROSS_KERNEL="$cross_kernel" \
-    -e FEDORA_RELEASE="$release" \
-    -e UKE_VIDEO_OVERLAY="${UKE_VIDEO_OVERLAY:-0}" \
-    -e UKE_BUILD_RUN_ID -e UKE_BUILD_OUTPUT=/build-output \
-    -v "$cache_dir:/build-cache" -v "$output:/build-output" \
-    -v "$workspace:/work" -w /work "$arm_image" \
-    bash -s <<'BUILD_RPMS'
-set -Eeuo pipefail
-release=${FEDORA_RELEASE:?}
-cache_dir=/build-cache
-source uke-fedora-builder/src/image/package-lock.sh
-dnf=(dnf5 -y --setopt=system_cachedir=/build-cache/dnf --setopt=keepcache=True)
-export UKE_CCACHE=1 CCACHE_DIR=/build-cache/ccache CCACHE_MAXSIZE=10G
-git config --global --add safe.directory /work/senemos-uke-kernel
-bash uke-fedora-builder/src/image/build-control.sh stage 'Prepare source RPMs'
-kernel_srpm_stamp=$cache_dir/kernel-srpm-$release.stamp
-kernel_key=$( { git -C senemos-uke-kernel rev-parse HEAD
-                git -C senemos-uke-kernel status --porcelain
-              } | sha256sum | cut -d' ' -f1 )
-if [[ -f $kernel_srpm_stamp && $(<"$kernel_srpm_stamp") == "$kernel_key" ]] &&
-   compgen -G "senemos-uke-kernel/build/srpm/*.src.rpm" >/dev/null; then
-    printf 'Reusing kernel source RPMs (%s)\n' "$kernel_key"
-else
-    make -C senemos-uke-kernel srpm
-    printf '%s\n' "$kernel_key" > "$kernel_srpm_stamp"
-fi
-make -C uke-linux-hardware-support/uke-core-meta FEDORA44_LEGACY=1 srpm
-make -C uke-linux-hardware-support/uke-sensors touchscreen-srpm
-make -C uke-linux-hardware-support/uke-console-input srpm
-make -C uke-linux-hardware-support/uke-platform-runtime srpm
-make -C uke-linux-hardware-support/uke-boot FEDORA44_LEGACY=1 srpm
-make -C uke-linux-hardware-support/xiaomi-uke-firmware image-data-srpm
-for package in libssc iio-sensor-proxy uke-ssc-fileservice; do
-    make -C uke-linux-hardware-support/uke-sensors PACKAGE="$package" srpm
-done
-kernel_spec=senemos-uke-kernel/build/srpm/rpmbuild/SPECS/senemos-uke-linux-kernel-mainline.spec
-boot_spec=uke-linux-hardware-support/uke-boot/build/srpm/rpmbuild/SPECS/uke-boot-integration.spec
-[[ $(rpmspec -q --srpm --qf '%{VERSION}-%{RELEASE}' --target aarch64 "$kernel_spec") == "$uke_kernel_rpm_release" ]] || {
-    echo 'Kernel RPM spec differs from the Fedora 44 package lock' >&2; exit 1;
-}
-[[ $(rpmspec -q --srpm --qf '%{VERSION}-%{RELEASE}' --target aarch64 "$boot_spec") == "$uke_boot_rpm_release" ]] || {
-    echo 'Boot integration RPM spec differs from the Fedora 44 package lock' >&2; exit 1;
-}
-bash uke-fedora-builder/src/image/build-control.sh done
-tops=(
-  senemos-uke-kernel/build/srpm/rpmbuild
-  uke-linux-hardware-support/uke-core-meta/build/srpm/rpmbuild
-  uke-linux-hardware-support/uke-sensors/build/rpmbuild
-  uke-linux-hardware-support/uke-console-input/build/rpmbuild
-  uke-linux-hardware-support/uke-platform-runtime/build/rpmbuild
-  uke-linux-hardware-support/uke-boot/build/srpm/rpmbuild
-)
-for top in "${tops[@]}"; do
-    case $top in
-        senemos-uke-kernel/*) component=kernel;;
-        */uke-core-meta/*) component=core-meta;;
-        */uke-sensors/*) component=touchscreen;;
-        */uke-console-input/*) component=console-input;;
-        */uke-platform-runtime/*) component=battery;;
-        */uke-boot/*) component=boot-integration;;
-    esac
-    bash uke-fedora-builder/src/image/build-control.sh stage "RPM: $component"
-    specs=("$top"/SPECS/*.spec)
-    ((${#specs[@]} == 1)) && [[ -f ${specs[0]} ]] || { printf 'Expected one spec in %s\n' "$top" >&2; exit 1; }
-    if [[ $top == senemos-uke-kernel/build/srpm/rpmbuild ]]; then
-        rm -f -- "$top/.fedora${release}-cross-pending"
-    fi
-    if [[ $top == senemos-uke-kernel/build/srpm/rpmbuild && $UKE_REBUILD_KERNEL == 0 ]] && \
-       bash uke-fedora-builder/src/image/kernel-rpm-cache.sh check "$top"; then
-        printf 'Reusing verified Linux %s RPMs and boot build\n' "$uke_kernel_version"
-        bash uke-fedora-builder/src/image/build-control.sh done
-        continue
-    fi
-    if [[ $top != senemos-uke-kernel/build/srpm/rpmbuild ]] && \
-       bash uke-fedora-builder/src/image/rpm-build-cache.sh check "$top"; then
-        printf 'Reusing verified RPMs from %s\n' "$top"
-        bash uke-fedora-builder/src/image/build-control.sh done
-        continue
-    fi
-    if [[ $top != senemos-uke-kernel/build/srpm/rpmbuild ]]; then
-        bash uke-fedora-builder/src/image/rpm-build-cache.sh invalidate "$top"
-    fi
-    if [[ $top == senemos-uke-kernel/build/srpm/rpmbuild ]]; then
-        if [[ -e $top/native-kernel-out || -e $top/boot-userspace ]]; then
-            previous=$(mktemp -d "$top/previous-native-kernel-out.XXXXXXXX")
-            for path in native-kernel-out boot-userspace; do
-                [[ ! -e $top/$path ]] || mv -- "$top/$path" "$previous/"
-            done
-            printf 'Preserved the previous kernel work at %s\n' "$previous"
-        fi
-    fi
-    "${dnf[@]}" builddep "${specs[0]}"
-    if [[ $top == senemos-uke-kernel/build/srpm/rpmbuild && $UKE_CROSS_KERNEL == 1 ]]; then
-        rpmbuild -bp --nodeps --target aarch64 --define "_topdir /work/$top" "${specs[0]}"
-        source=$top/BUILD/senemos-uke-linux-kernel-mainline-${uke_kernel_version}-build/linux-${uke_kernel_version}
-        base=$top/boot-userspace
-        bash "$source/boot-recipe/src/boot/make-initramfs-base.sh" "$base" "$uke_kernel_krel"
-        clang++ -std=c++17 -O2 -Wall -Wextra -Werror -ffile-prefix-map="$PWD"=. \
-            "$source/boot-recipe/src/boot/offline-switch-root.cpp" -o "$base/uke-offline-switch-root"
-        clang++ -std=c++20 -O2 -Wall -Wextra -Werror \
-            "$source/boot-recipe/src/boot/boot-image.cpp" -o "$base/boot-image-aarch64"
-        for binary in uke-offline-switch-root boot-image-aarch64; do
-            readelf -h "$base/$binary" | grep -E 'Machine:.*AArch64' >/dev/null
-        done
-        printf '%s\n' "$uke_kernel_krel" > "$top/.fedora${release}-cross-pending"
-        continue
-    fi
-    rpmbuild -ba --target aarch64 --define "_topdir /work/$top" "${specs[0]}"
-    if [[ $top == senemos-uke-kernel/build/srpm/rpmbuild ]]; then
-        # RPM removes BUILD after -ba; restore the verified source needed by
-        # the cache receipt and the per-profile boot image builds.
-        rpmbuild -bp --nodeps --target aarch64 --define "_topdir /work/$top" "${specs[0]}"
-        bash uke-fedora-builder/src/image/kernel-rpm-cache.sh record "$top"
-    else
-        bash uke-fedora-builder/src/image/rpm-build-cache.sh record "$top"
-    fi
-    bash uke-fedora-builder/src/image/build-control.sh done
-done
-sensor_root=uke-linux-hardware-support/uke-sensors/build/srpm
-for package in libssc iio-sensor-proxy uke-ssc-fileservice; do
-    bash uke-fedora-builder/src/image/build-control.sh stage "RPM: $package"
-    top=$sensor_root/$package/rpmbuild
-    spec=$top/SPECS/$package.spec
-    dependencies=()
-    if [[ $package == iio-sensor-proxy ]]; then
-        dependencies=("$sensor_root/libssc/rpmbuild/RPMS/aarch64/"libssc{,-devel}-0.4.4-*.fc44.aarch64.rpm)
-    fi
-    if bash uke-fedora-builder/src/image/rpm-build-cache.sh check "$top" "${dependencies[@]}"; then
-        printf 'Reusing verified RPMs from %s\n' "$top"
-    else
-        bash uke-fedora-builder/src/image/rpm-build-cache.sh invalidate "$top"
-        "${dnf[@]}" builddep "$spec"
-        rpmbuild -ba --target aarch64 --define "_topdir /work/$top" "$spec"
-        bash uke-fedora-builder/src/image/rpm-build-cache.sh record "$top" "${dependencies[@]}"
-    fi
-    if [[ $package == libssc ]]; then
-        "${dnf[@]}" install \
-            "$top"/RPMS/aarch64/libssc-0.4.4-*.fc44.aarch64.rpm \
-            "$top"/RPMS/aarch64/libssc-devel-0.4.4-*.fc44.aarch64.rpm
-    fi
-    bash uke-fedora-builder/src/image/build-control.sh done
-done
-top=uke-linux-hardware-support/xiaomi-uke-firmware/build/fedora${release}-image-data/rpmbuild
-bash uke-fedora-builder/src/image/build-control.sh stage 'RPM: OEM data'
-oem_rpm="$top/RPMS/noarch/uke-fedora${release}-oem-data-3.0.304.0-2.fc${release}.noarch.rpm"
-if bash uke-fedora-builder/src/image/rpm-build-cache.sh check "$top" && \
-   bash uke-fedora-builder/src/image/verify-oem-rpm.sh "$oem_rpm"; then
-    printf 'Reusing verified RPMs from %s\n' "$top"
-else
-    bash uke-fedora-builder/src/image/rpm-build-cache.sh invalidate "$top"
-    rpmbuild -ba --target noarch --define "_topdir /work/$top" \
-        "$top/SPECS/uke-oem-data.spec"
-    bash uke-fedora-builder/src/image/verify-oem-rpm.sh "$oem_rpm"
-    bash uke-fedora-builder/src/image/rpm-build-cache.sh record "$top"
-fi
-bash uke-fedora-builder/src/image/build-control.sh done
-BUILD_RPMS
+build_common_start 'Fedora image pairs: rootfs, boot_a and userdata per profile.'
+build_common_stock_boot
 
-kernel_top=$workspace/senemos-uke-kernel/build/srpm/rpmbuild
-if [[ -f $kernel_top/.fedora${release}-cross-pending ]]; then
-    # The deferred cross build completes the kernel RPM stage started above.
-    build_completed=$(jq -r .completed "$output/status.json")
-    build_stage='RPM: kernel (cross-compile and package)'
-    build_write_status
-    amd_image=$("$here/src/image/ensure-build-image.sh" "$container" linux/amd64)
-    jobs=$(nproc)
-    if ((jobs > 16)); then jobs=16; fi
-    "$container" run --rm -i --network=host --platform linux/amd64 --security-opt label=disable \
-        --label "org.uke-fedora.build-run=$UKE_BUILD_RUN_ID" \
-        -e UKE_KERNEL_KREL="$uke_kernel_krel" -e UKE_KERNEL_VERSION="$uke_kernel_version" \
-        -e UKE_SOURCE_DATE_EPOCH="$kernel_epoch" -e UKE_JOBS="$jobs" \
-        -e FEDORA_RELEASE="$release" \
-        -v "$cache_dir:/build-cache" -v "$workspace:/work" -w /work \
-        "$amd_image" bash -s <<'CROSS_KERNEL'
-set -Eeuo pipefail
-release=${FEDORA_RELEASE:?}
-top=/work/senemos-uke-kernel/build/srpm/rpmbuild
-source=$top/BUILD/senemos-uke-linux-kernel-mainline-${UKE_KERNEL_VERSION}-build/linux-${UKE_KERNEL_VERSION}
-[[ $(cat "$top/.fedora${release}-cross-pending") == "$UKE_KERNEL_KREL" ]] || exit 2
-export UKE_CROSS_KERNEL=1 UKE_CCACHE=1 CCACHE_DIR=/build-cache/ccache-cross CCACHE_MAXSIZE=10G
-export KBUILD_BUILD_USER=senemos KBUILD_BUILD_HOST=copr-builder KBUILD_BUILD_VERSION=1
-export SOURCE_DATE_EPOCH=$UKE_SOURCE_DATE_EPOCH
-KBUILD_BUILD_TIMESTAMP=$(date -u -d "@$SOURCE_DATE_EPOCH" '+%Y-%m-%d %H:%M:%S UTC')
-export KBUILD_BUILD_TIMESTAMP
-bash "$source/boot-recipe/src/boot/build-payload.sh" "$source" \
-    "$top/native-kernel-out" "$top/boot-userspace/base" "$UKE_KERNEL_KREL" "$UKE_JOBS"
-CROSS_KERNEL
-
-    "$container" run --rm -i --network=host --platform linux/arm64 --security-opt label=disable \
-        --label "org.uke-fedora.build-run=$UKE_BUILD_RUN_ID" \
-        "${sanitizer_env[@]}" -e FEDORA_RELEASE="$release" \
-        -v "$cache_dir:/build-cache" -v "$workspace:/work" -w /work \
-        "$arm_image" bash -s <<'PACKAGE_KERNEL'
-set -Eeuo pipefail
-release=${FEDORA_RELEASE:?}
-dnf=(dnf5 -y --setopt=system_cachedir=/build-cache/dnf --setopt=keepcache=True)
-top=/work/senemos-uke-kernel/build/srpm/rpmbuild
-spec=$top/SPECS/senemos-uke-linux-kernel-mainline.spec
-"${dnf[@]}" builddep "$spec"
-UKE_PREBUILT_KERNEL=1 rpmbuild -ba --target aarch64 --define "_topdir $top" "$spec"
-rpmbuild -bp --nodeps --target aarch64 --define "_topdir $top" "$spec"
-bash /work/uke-fedora-builder/src/image/kernel-rpm-cache.sh record "$top"
-rm -f -- "$top/.fedora${release}-cross-pending"
-PACKAGE_KERNEL
-    build_progress_done
-fi
-
-[[ -d $kernel_top/BUILD ]] || die 'Kernel RPM build did not create its BUILD directory'
+# The kernel compile, its RPM recipes and the subpackage staging all live in
+# src/image/build-kernel-rpms.sh, shared with build-rpms.sh and
+# build-boot-images.sh.  Only the consumers below differ per orchestrator.
 kernel_rpms=$output/kernel-rpms
-[[ ! -L $kernel_rpms ]] || die 'Kernel RPM staging directory is a symlink'
-mkdir -p "$kernel_rpms"
-find "$kernel_rpms" -maxdepth 1 -type f -name 'senemos-uke-linux-kernel-mainline*.rpm' -delete
-for part in core modules dtbs; do
-    rpm=$kernel_top/RPMS/aarch64/senemos-uke-linux-kernel-mainline-$part-$uke_kernel_rpm_release.aarch64.rpm
-    [[ -s $rpm && ! -L $rpm ]] || die "Missing matched kernel RPM: $rpm"
-    cp --reflink=auto -- "$rpm" "$kernel_rpms/"
-done
-kernel_out=$kernel_top/native-kernel-out
+build_kernel_rpms "$kernel_rpms"
+kernel_top=$BUILD_KERNEL_TOP
+kernel_out=$BUILD_KERNEL_OUT
 if [[ -s $kernel_out/cross-source.sha256 ]]; then
     amd_image=${amd_image:-$("$here/src/image/ensure-build-image.sh" "$container" linux/amd64)}
 fi
@@ -444,6 +197,7 @@ cp "$workspace"/uke-linux-hardware-support/uke-sensors/build/srpm/libssc/rpmbuil
 cp "$workspace"/uke-linux-hardware-support/uke-sensors/build/srpm/iio-sensor-proxy/rpmbuild/RPMS/aarch64/iio-sensor-proxy-3.9-*.fc44.aarch64.rpm "$hardware_rpms/"
 cp "$workspace"/uke-linux-hardware-support/uke-sensors/build/srpm/uke-ssc-fileservice/rpmbuild/RPMS/aarch64/uke-ssc-fileservice-2026.09.21-*.fc44.aarch64.rpm "$hardware_rpms/"
 cp "$workspace"/uke-linux-hardware-support/xiaomi-uke-firmware/build/fedora${release}-image-data/rpmbuild/RPMS/noarch/uke-fedora${release}-oem-data-3.0.304.0-2.fc${release}.noarch.rpm "$hardware_rpms/"
+cp "$workspace"/uke-linux-hardware-support/uke-video/build/srpm/RPMS/aarch64/uke-vaapi-v4l2-*.fc${release}.aarch64.rpm "$hardware_rpms/"
 
 blobs=$workspace/uke-linux-hardware-support/xiaomi-uke-firmware/payload/oem-os3.0.304.0
 input_hash=$(
@@ -527,7 +281,6 @@ build_profile() {
         profile_valid "$stage" "$profile" || die "Incomplete $profile rootfs"
         mv -- "$stage" "$root_dir"
     fi
-    build_progress_done
     build_progress "$profile boot pair"
     if ((root_reused && reuse_profiles)) && profile_valid "$pair_dir" "$profile"; then
         printf 'Reusing verified %s boot pair\n' "$profile"
@@ -547,7 +300,6 @@ build_profile() {
         profile_valid "$stage" "$profile" || die "Incomplete $profile pair"
         mv -- "$stage" "$pair_dir"
     fi
-    build_progress_done
 }
 
 tty_profiles=()
@@ -576,7 +328,6 @@ else
 fi
 build_progress 'Audit release outputs'
 audit_final
-build_progress_done
 printf 'Requested profiles: %s\n' "${requested_profiles[*]}"
 printf 'Built or reused image pairs: %s\n' "${build_profiles[*]}"
 printf 'O82-36 native display: seven fixed OEM modes by default\n'

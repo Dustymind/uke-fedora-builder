@@ -25,7 +25,7 @@ kernel repository, not here.
 ```sh
 git status
 git branch --show-current
-bash -n build-images.sh build-rootfs.sh src/image/*.sh
+bash -n build-images.sh build-rpms.sh build-boot-images.sh build-rootfs.sh build-boot-a.sh src/image/*.sh
 ```
 
 Read the top of the umbrella backlog, pick one item and say which files you
@@ -53,7 +53,7 @@ URLs.
 
 ## Checks
 
-- `bash -n build-images.sh build-rootfs.sh src/image/*.sh` — fast syntax gate.
+- `bash -n build-images.sh build-rpms.sh build-boot-images.sh build-rootfs.sh build-boot-a.sh src/image/*.sh` — fast syntax gate.
 - CI runs `shellcheck` and the contract tests in
   `.github/workflows/source-contracts.yml`; there is no local one-shot runner yet
   (umbrella backlog B12). For script changes, install `shellcheck` and reproduce
@@ -67,17 +67,24 @@ build is not a boot test.
 
 ## Build
 
-Image build from the umbrella checkout:
+Three entry points, and none of them builds what another one owns:
 
 ```sh
+# kernel RPMs only, for installing into a running tablet
+./uke-fedora-builder/build-rpms.sh --output build/rpms
+
+# boot_a only, skipping the rootfs
+./uke-fedora-builder/build-boot-images.sh --profiles kde --output build/boot
+
+# rootfs plus both images
 ./uke-fedora-builder/build-images.sh --cross-kernel --profiles kde,gnome \
     --output build/images
 ```
 
 Needs Docker or Podman, `avbtool`, `jq`, `g++`, `zstd` and free disk; see
-[BUILDING.md](docs/BUILDING.md) and [BUILD-CACHE.md](docs/BUILD-CACHE.md). The
-builder creates files only: it never flashes a device, changes a slot or touches
-`userdata`.
+[BUILD-TARGETS.md](docs/BUILD-TARGETS.md), [BUILDING.md](docs/BUILDING.md) and
+[BUILD-CACHE.md](docs/BUILD-CACHE.md). The builders create files only: they
+never flash a device, change a slot or touch `userdata`.
 
 ## Documentation rules
 

@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
-# Sourced by the Fedora 44 image orchestrator.
+# Build lifecycle, status file and cancellation.
+#
+# There is deliberately no stage counter here.  Every stage runs inline in a
+# script under `set -Eeuo pipefail`, so reaching the end already means every
+# stage ran: a counter would be a second, independently maintained statement of
+# a fact the control flow guarantees.  Every time the two disagreed the build
+# was reported as failed after producing every artifact, and the reader had to
+# work out which of the two was right.
+#
+# status.json therefore records what is actually known - which stage is running
+# and when the run started - and success is the exit code.
 build_pid_start() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
 
 build_write_status() {
@@ -8,22 +18,20 @@ build_write_status() {
     flock 8
     tmp=$(mktemp "$output/.status.XXXXXXXX")
     jq -n --arg state "$build_state" --arg stage "$build_stage" \
-        --arg run "$UKE_BUILD_RUN_ID" --argjson completed "$build_completed" \
-        --argjson total "$build_total" --argjson started "$build_started" \
+        --arg run "$UKE_BUILD_RUN_ID" --argjson started "$build_started" \
         --argjson updated "$(date +%s)" \
-        '{schema_version:1,run_id:$run,state:$state,stage:$stage,
-          completed:$completed,total:$total,started_unix:$started,updated_unix:$updated}' > "$tmp"
+        '{schema_version:2,run_id:$run,state:$state,stage:$stage,
+          started_unix:$started,updated_unix:$updated}' > "$tmp"
     chmod 0666 "$tmp"
     mv -f -- "$tmp" "$output/status.json"
     exec 8>&-
 }
 
+# build_progress <stage>
+# Record the stage that is running now.  Called before the work, not after: the
+# label is what a reader needs while it is stuck.
 build_progress() {
     UKE_BUILD_OUTPUT=$output bash "${BASH_SOURCE[0]}" stage "$1"
-}
-
-build_progress_done() {
-    UKE_BUILD_OUTPUT=$output bash "${BASH_SOURCE[0]}" done
 }
 
 build_containers() {
@@ -41,27 +49,35 @@ build_stop_containers() {
 build_finish() {
     local code=$1
     trap - EXIT INT TERM
-    build_completed=$(jq -r .completed "$output/status.json")
-    build_stage=$(jq -r .stage "$output/status.json")
-    if ((code == 0 && build_completed == build_total)); then
-        build_state=complete
-        build_stage='Requested image pairs complete'
-    elif ((code == 0)); then
-        build_state=failed
-        build_stage='Build ended before all stages completed'
+    if ((code == 0)) && [[ -e $output/.cancel-requested ]]; then
+        # A cancel that the running stage honoured still exits 0 from the
+        # stage itself, so the marker wins over the exit code.
+        build_state=cancelled
+        build_stage='Stopped by user'
     elif [[ -e $output/.cancel-requested || $code == 130 || $code == 143 ]]; then
         build_state=cancelled
         build_stage='Stopped by user'
+    elif ((code == 0)); then
+        build_state=complete
+        build_stage='Complete'
     else
         build_state=failed
+        build_stage=$(jq -r '.stage // "Build failed"' "$output/status.json" 2>/dev/null)
+        [[ -n $build_stage ]] || build_stage='Build failed'
     fi
     if [[ $build_state != complete ]]; then build_stop_containers; fi
     build_write_status
-    printf '%s: %s (%s/%s stages)\n' "$build_state" "$build_stage" \
-        "$build_completed" "$build_total" | tee -a "$output/progress.log"
+    printf '%s: %s; elapsed %s min\n' "$build_state" "$build_stage" \
+        "$(build_elapsed_minutes)" | tee -a "$output/progress.log"
     rm -f -- "$output/.build-run" "$output/.cancel-requested"
     if [[ -n ${stock_dir:-} ]]; then rm -rf -- "$stock_dir"; fi
-    if ((code == 0)) && [[ $build_state == failed ]]; then exit 1; fi
+}
+
+build_elapsed_minutes() {
+    local started
+    started=$(jq -r '.started_unix // empty' "$output/status.json" 2>/dev/null) || true
+    [[ -n $started ]] || { printf '0'; return; }
+    printf '%s' "$(( ($(date +%s) - started) / 60 ))"
 }
 
 build_start() {
@@ -82,8 +98,6 @@ build_start() {
     UKE_BUILD_RUN_ID=$(cat /proc/sys/kernel/random/uuid)
     export UKE_BUILD_RUN_ID
     build_started=$(date +%s)
-    build_completed=0
-    build_total=${build_total:-21}
     build_state=running
     build_stage='Starting'
     : > "$output/progress.log"
@@ -99,7 +113,7 @@ build_start() {
 
 build_status() {
     [[ -s $output/status.json ]] || { echo "No build status in $output" >&2; return 1; }
-    jq -r '"\(.state): [\(.completed)/\(.total)] \(.stage); elapsed \(((now - .started_unix)/60)|floor) min"' \
+    jq -r '"\(.state): \(.stage); elapsed \(((now - .started_unix)/60)|floor) min"' \
         "$output/status.json"
 }
 
@@ -136,27 +150,20 @@ build_stop() {
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
-    [[ $# -ge 1 && -n ${UKE_BUILD_OUTPUT:-} ]] || exit 2
+    [[ $# == 2 && -n ${UKE_BUILD_OUTPUT:-} ]] || exit 2
     output=$UKE_BUILD_OUTPUT
     [[ -s $output/status.json ]] || exit 2
-    exec 8>>"$output/.status.lock"
-    flock 8
-    tmp=$(mktemp "$output/.status.XXXXXXXX")
     case $1 in
         stage)
-            [[ $# == 2 ]] || exit 2
+            exec 8>>"$output/.status.lock"
+            flock 8
+            tmp=$(mktemp "$output/.status.XXXXXXXX")
             jq --arg stage "$2" --argjson updated "$(date +%s)" \
                 '.stage=$stage | .updated_unix=$updated' "$output/status.json" > "$tmp"
             chmod 0666 "$tmp"
             mv -f -- "$tmp" "$output/status.json"
             exec 8>&-
-            jq -r '"[\(.completed)/\(.total)] \(.stage)"' "$output/status.json" | tee -a "$output/progress.log";;
-        done)
-            jq --argjson updated "$(date +%s)" \
-                '.completed += 1 | .updated_unix=$updated' "$output/status.json" > "$tmp"
-            chmod 0666 "$tmp"
-            mv -f -- "$tmp" "$output/status.json"
-            exec 8>&-;;
-        *) rm -f -- "$tmp"; exit 2;;
+            jq -r '.stage' "$output/status.json" | tee -a "$output/progress.log";;
+        *) exit 2;;
     esac
 fi

@@ -116,7 +116,8 @@ if [[ ${1:-} == --inside ]]; then
         /hardware-rpms/libssc-0.4.4-*.fc44.aarch64.rpm \
         /hardware-rpms/iio-sensor-proxy-3.9-*.fc44.aarch64.rpm \
         /hardware-rpms/uke-ssc-fileservice-2026.09.21-*.fc44.aarch64.rpm \
-        /hardware-rpms/uke-fedora${release}-oem-data-3.0.304.0-2.fc${release}.noarch.rpm
+        /hardware-rpms/uke-fedora${release}-oem-data-3.0.304.0-2.fc${release}.noarch.rpm \
+        /hardware-rpms/uke-vaapi-v4l2-*.fc${release}.aarch64.rpm
     phase_done hardware-packages
     rpm --root "$root" -q --qf '%{NAME} %{VERSION} %{RELEASE} %{ARCH}\n' \
         uke-touchscreen uke-battery-observer uke-boot-integration | \
@@ -132,6 +133,8 @@ if [[ ${1:-} == --inside ]]; then
              ($1 == "uke-ssc-fileservice" && $2 == "2026.09.21" && $3 ~ /^[1-9][0-9]*\.fc44$/ && $4 == "aarch64") ||
              ($1 == "uke-fedora" rel "-oem-data" && $2 == "3.0.304.0" && $3 == "2.fc" rel && $4 == "noarch") { good++ }
              END { exit good != 4 || NR != 4 }' || die 'Expected Fedora 44 SSC and OEM data RPMs'
+    rpm --root "$root" -q --qf '%{NAME}\n' uke-vaapi-v4l2 >/dev/null \
+        || die 'The VA-API V4L2 driver is missing from the image'
     fi
     systemctl --root="$root" enable uke-touchscreen.service uke-battery.service uke-wifi-factory.service uke-bluetooth-address.service \
         uke-clock-restore.service uke-clock-save.timer
@@ -143,11 +146,14 @@ if [[ ${1:-} == --inside ]]; then
         for name in normal.bin config.ini; do
             [[ -f /local-blobs/touch/$variant/$name && ! -L /local-blobs/touch/$variant/$name ]] || die "Missing $variant touch input: $name"
             install -Dm600 "/local-blobs/touch/$variant/$name" "$root/var/lib/uke-touch/$variant/$name"
+            install -Dm644 "/local-blobs/touch/$variant/$name" "$root/usr/lib/firmware/qcom/uke/touch/$variant/$name"
         done
         chmod 0700 "$root/var/lib/uke-touch/$variant"
+        chmod 0755 "$root/usr/lib/firmware/qcom/uke/touch/$variant"
     done
     [[ -f /local-blobs/touch/reference.bin && ! -L /local-blobs/touch/reference.bin ]] || die 'Missing device touch reference'
     install -Dm600 /local-blobs/touch/reference.bin "$root/var/lib/uke-touch/reference.bin"
+    install -Dm644 /local-blobs/touch/reference.bin "$root/usr/lib/firmware/qcom/uke/touch/reference.bin"
     chmod 0700 "$root/var/lib/uke-touch"
     profile=$(cat /workspace/PROFILE-ID)
     case $profile in
@@ -177,12 +183,14 @@ if [[ ${1:-} == --inside ]]; then
             rm -f "$root/usr/lib/systemd/system/uke-create-user.service" \
                 "$root/usr/libexec/uke-create-user"
             common=(NetworkManager-wifi bluez dbus-daemon mesa-dri-drivers pipewire wireplumber upower
-                    polkit udisks2 xorg-x11-server-Xwayland glibc-langpack-ru langpacks-ru)
+                    polkit udisks2 xorg-x11-server-Xwayland glibc-langpack-zh langpacks-zh_CN
+                    google-noto-sans-cjk-fonts)
             case $profile in
                 kde) desktop=(plasma-desktop plasma-workspace kwin sddm sddm-breeze plasma-setup
                               sddm-wayland-plasma konsole dolphin plasma-nm bluedevil
                               plasma-keyboard plasma-systemsettings kscreen plasma-pa
-                              powerdevil firefox kate plasma-discover ark kcalc); display=sddm ;;
+                              powerdevil firefox kate plasma-discover ark kcalc
+                              qemu-system-aarch64 qemu-img libvirt virt-install edk2-aarch64); display=sddm ;;
                 gnome) desktop=(gnome-shell gnome-session-wayland-session gdm gnome-initial-setup gnome-control-center
                                 gnome-settings-daemon gnome-terminal nautilus firefox
                                 gnome-text-editor gnome-software file-roller gnome-calculator); display=gdm ;;
@@ -200,7 +208,7 @@ if [[ ${1:-} == --inside ]]; then
                 --installroot="$root" --releasever=44 --setopt=install_weak_deps=False \
                 install noopenh264 "${common[@]}" "${desktop[@]}"
             if [[ $profile != tty ]]; then
-                printf 'LANG=ru_RU.UTF-8\nLC_TIME=ru_RU.UTF-8\n' > "$root/etc/locale.conf"
+                printf 'LANG=zh_CN.UTF-8\nLC_TIME=zh_CN.UTF-8\n' > "$root/etc/locale.conf"
             fi
             if [[ $display == sddm ]]; then
                 [[ -x $root/usr/libexec/plasma-setup-bootutil &&
@@ -234,6 +242,16 @@ if [[ ${1:-} == --inside ]]; then
             ;;
         *) die 'Invalid profile in workspace' ;;
     esac
+    # authselect owns /etc/pam.d/system-auth and /etc/pam.d/password-auth as
+    # ghost files: only its posttrans creates them, and that script discards
+    # its own errors.  An image built without them still reaches the display
+    # manager, but every password prompt fails, because sddm, sudo and the
+    # console all include those files.  Re-apply the stock profile and fail
+    # the build if the PAM stack is still absent.
+    chroot "$root" /usr/bin/authselect select local with-silent-lastlog --force --nobackup
+    for pam in system-auth password-auth; do
+        [[ -s $root/etc/pam.d/$pam ]] || die "PAM stack is missing: /etc/pam.d/$pam"
+    done
     phase_done profile-packages-and-configuration
     for forbidden in senemos-uke-linux-kernel-mainline senemos-uke-linux-kernel-mainline-boot uke-kernel-update uke-charge-control uke-offline-charge uke-boot-recovery uke-cdc-debug; do
         if rpm --root "$root" -q "$forbidden" >/dev/null 2>&1; then
@@ -276,7 +294,11 @@ case $profile in tty|kde|gnome|phosh|plasma-mobile) ;; *) die 'Unknown profile' 
 verify="$here/../uke-linux-hardware-support/xiaomi-uke-firmware/src/verify-oem-304.sh"
 [[ -x $verify ]] || die "Local blob verifier missing: $verify"
 "$verify" --root "$blobs" || die 'Bundled OEM files are incomplete; see uke-linux-hardware-support/xiaomi-uke-firmware/docs/LOCAL-BLOBS.md'
-if command -v podman >/dev/null; then container=podman
+if [[ -n ${UKE_CONTAINER:-} ]]; then
+    [[ $UKE_CONTAINER == docker || $UKE_CONTAINER == podman ]] \
+        || die 'UKE_CONTAINER must be docker or podman'
+    container=$UKE_CONTAINER
+elif command -v podman >/dev/null; then container=podman
 elif command -v docker >/dev/null; then container=docker
 else die 'Docker or Podman is required; host packages are not installed automatically'; fi
 rpms=$(realpath -- "$rpms")
@@ -371,8 +393,51 @@ hwdb_image=$(bash "$here/src/image/ensure-hwdb-image.sh" "$container")
 "$container" run --rm --network=none --security-opt label=disable \
     "${run_label[@]}" -v "$output:/workspace" "$hwdb_image" \
     systemd-hwdb --root=/workspace/root update
+# Flatpak sandboxes cannot see the host DRI directory, so give them a copy
+# of the V4L2 VA-API driver under a path the override below can name.
+test -f "$output/root/usr/lib64/dri/v4l2_drv_video.so" \
+    || die "uke-vaapi-v4l2 driver is missing from the rootfs"
+sudo install -Dm644 "$output/root/usr/lib64/dri/v4l2_drv_video.so" \
+    "$output/root/var/lib/uke-vaapi/v4l2_drv_video.so"
+sudo ln -sfn v4l2_drv_video.so "$output/root/var/lib/uke-vaapi/msm_drv_video.so"
+sudo install -Dm644 "$here/configs/flatpak/global" \
+    "$output/root/var/lib/flatpak/overrides/global"
+# Assets that live in the builder rather than the umbrella. The Nanosic MCU
+# firmware is loaded by the HID driver at probe time, so a missing file means no
+# keyboard at all.
+sudo install -Dm644 "$here/configs/audio/fs19xx.fsm" \
+    "$output/root/usr/lib/firmware/qcom/uke/audio/fs19xx.fsm"
+sudo install -Dm644 "$here/configs/audio/asound.state" \
+    "$output/root/var/lib/alsa/asound.state"
+sudo install -Dm644 "$here/configs/wireplumber/85-uke-speaker-priority.conf" \
+    "$output/root/usr/share/wireplumber/wireplumber.conf.d/85-uke-speaker-priority.conf"
+sudo install -Dm644 "$here/configs/nanosic/MCU_Upgrade.bin" \
+    "$output/root/usr/lib/firmware/nanosic/MCU_Upgrade.bin"
+sudo install -Dm755 "$here/configs/nanosic/nanosic-authd.py" \
+    "$output/root/usr/local/sbin/nanosic-authd"
+sudo install -Dm644 "$here/configs/nanosic/nanosic-authd.service" \
+    "$output/root/usr/lib/systemd/system/nanosic-authd.service"
+# The auth daemon is installed but deliberately NOT enabled: the token comes
+# from an Android AIDL HAL, and answering the handshake with a zero token makes
+# the MCU stop scanning keys a few minutes after boot. The driver leaves the
+# handshake alone (mi_auth=0), so the daemon has nothing useful to do until a
+# real token source exists.
+#
+# The backlight helper is enabled only when the keyboard actually has a
+# backlight: the touchpad SKU does, the basic SKU has a Caps Lock lamp and
+# nothing else. The unit carries ConditionPathExists for the same reason.
+sudo install -Dm755 "$here/configs/nanosic/nanosic-backlight" \
+    "$output/root/usr/local/sbin/nanosic-backlight"
+sudo install -Dm644 "$here/configs/nanosic/nanosic-backlight.service" \
+    "$output/root/usr/lib/systemd/system/nanosic-backlight.service"
+sudo install -d "$output/root/etc/systemd/system/multi-user.target.wants"
+sudo ln -sf /usr/lib/systemd/system/nanosic-backlight.service \
+    "$output/root/etc/systemd/system/multi-user.target.wants/nanosic-backlight.service"
+sudo install -d "$output/root/etc/modules-load.d"
+printf '%s\n' hid-nanosic-wn8030 | \
+    sudo tee "$output/root/etc/modules-load.d/nanosic.conf" >/dev/null
 if [[ $copr == 1 ]]; then
-    install -Dm644 "$here/configs/images/uke-copr.repo" "$output/root/etc/yum.repos.d/uke-copr.repo"
+    sudo install -Dm644 "$here/configs/images/uke-copr.repo" "$output/root/etc/yum.repos.d/uke-copr.repo"
 fi
 "$container" run --rm --network=none --security-opt label=disable \
     "${run_label[@]}" -v "$output:/workspace" \

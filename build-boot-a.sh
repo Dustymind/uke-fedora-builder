@@ -6,38 +6,57 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 die() { printf 'build-boot-a: %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'HELP'
-Usage: ./build-boot-a.sh --rootfs DIR --kernel-source DIR \
-       --kernel-out DIR --stock-boot FILE --output NEW_DIR
+Usage: ./build-boot-a.sh [--rootfs DIR] --kernel-source DIR \
+       --kernel-out DIR --stock-boot FILE --output NEW_DIR \
+       [--profile-id ID --touch-panel PANEL]
 
 Pack the kernel's verified userdata Image into an OEM-derived Android v4 boot_a
 image with an unsigned AVB hash footer. Requires prepared Linux 7.3.1 RPM
 source/output and a reviewed OEM boot.img. Does not write a device.
+
+--rootfs is optional.  Without it the boot image is built on its own: no
+userdata.img is copied beside it and the manifest records boot metadata only.
+The rootfs was never an input to boot_a itself - it supplied the userdata image
+of the pair and the profile/touch identifiers - so a kernel-only change can
+produce just boot_a.  --profile-id and --touch-panel then supply the two
+identifiers the manifest wants; without them the manifest records "unknown"
+rather than guessing.
+
+Build the pair (boot_a plus userdata) by passing --rootfs; build only boot_a by
+omitting it.
 HELP
 }
 
-rootfs='' source='' kernel_out='' stock='' output=''
+rootfs='' source='' kernel_out='' stock='' output='' profile_id='' touch_panel=''
 while (($#)); do
     case $1 in
-        --rootfs|--kernel-source|--kernel-out|--stock-boot|--output)
+        --rootfs|--kernel-source|--kernel-out|--stock-boot|--output|--profile-id|--touch-panel)
             (($# >= 2)) || die "Missing value for $1"
             case $1 in
                 --rootfs) rootfs=$2;; --kernel-source) source=$2;; --kernel-out) kernel_out=$2;;
                 --stock-boot) stock=$2;; --output) output=$2;;
+                --profile-id) profile_id=$2;; --touch-panel) touch_panel=$2;;
             esac
             shift 2;;
         --help|-h) usage; exit 0;;
         *) die "Unknown argument: $1";;
     esac
 done
-[[ -d $rootfs && -d $source && -d $kernel_out && -f $stock && -n $output ]] || die 'Provide all input paths and an output directory'
-rootfs=$(realpath -- "$rootfs")
+[[ -d $source && -d $kernel_out && -f $stock && -n $output ]] || die 'Provide the kernel paths, the OEM boot and an output directory'
+[[ -z $rootfs || -d $rootfs ]] || die "Rootfs directory does not exist: $rootfs"
+if [[ -n $profile_id || -n $touch_panel ]]; then
+    [[ -n $rootfs ]] && die 'Do not combine --profile-id/--touch-panel with --rootfs'
+fi
+[[ -z $rootfs ]] || rootfs=$(realpath -- "$rootfs")
 source=$(realpath -- "$source")
 kernel_out=$(realpath -- "$kernel_out")
 stock=$(realpath -- "$stock")
 output=$(realpath -m -- "$output")
 [[ ! -e $output && ! -L $output ]] || die 'Output directory already exists'
-[[ -s $rootfs/userdata.img && -s $rootfs/userdata.raw.img && -s $rootfs/SHA256SUMS ]] || die 'Incomplete Fedora 44 rootfs'
-(cd "$rootfs"; sha256sum -c SHA256SUMS) || die 'Rootfs checksums failed'
+if [[ -n $rootfs ]]; then
+    [[ -s $rootfs/userdata.img && -s $rootfs/userdata.raw.img && -s $rootfs/SHA256SUMS ]] || die 'Incomplete Fedora 44 rootfs'
+    (cd "$rootfs"; sha256sum -c SHA256SUMS) || die 'Rootfs checksums failed'
+fi
 [[ -s $source/boot-recipe/src/boot/dracut/root-guard.sh && -s $kernel_out/.config && -s $kernel_out/boot-initramfs.cpio.gz ]] || die 'Incomplete prepared Linux build'
 release=$(sed -n 's/^kernel_release=//p' "$kernel_out/boot-manifest")
 locked_release=$(jq -er '.kernel_version + "-" + .kernel_release' "$here/configs/package-lock.json")
@@ -110,14 +129,37 @@ avbtool verify_image --image "$output/boot.img" || die 'AVB footer verification 
 "$output/boot-image" inspect "$output/boot.img" > "$output/boot-header.json"
 jq -e '.avb_footer_present==true and .image_bytes==100663296 and .payload_end<.image_bytes' "$output/boot-header.json" >/dev/null || die 'Final boot image lacks a bounded AVB footer'
 mv "$output/boot.img" "$output/fedora_boot.img"
-cp --reflink=auto "$rootfs/userdata.img" "$output/userdata.img"
-cp "$rootfs/PROFILE-ID" "$rootfs/TOUCH-PANEL" "$rootfs/LOCAL-BLOBS.sha256" "$output/"
-jq -n --arg profile "$(cat "$rootfs/PROFILE-ID")" --arg release "$release" \
+
+# Everything below splits on whether a rootfs was supplied.  With one, the
+# output is the pair the installer and the release archives expect.  Without
+# one it is boot_a alone: the manifest keeps the fields that describe boot and
+# records the rootfs-dependent ones as null, so a consumer can tell the two
+# shapes apart instead of reading a zero as a real size.
+if [[ -n $rootfs ]]; then
+    cp --reflink=auto "$rootfs/userdata.img" "$output/userdata.img"
+    cp "$rootfs/PROFILE-ID" "$rootfs/TOUCH-PANEL" "$rootfs/LOCAL-BLOBS.sha256" "$output/"
+    profile=$(cat "$rootfs/PROFILE-ID")
+    panel=$(cat "$rootfs/TOUCH-PANEL")
+    root_bytes=$(stat -c %s "$rootfs/userdata.raw.img")
+    userdata_hash=$(sha256sum "$output/userdata.img" | cut -d ' ' -f1)
+    image_set='["fedora_boot.img","userdata.img"]'
+else
+    # A boot-only build carries no rootfs, so the profile and touch panel are
+    # not observable from the output set.  --profile-id/--touch-panel record
+    # what a caller knows; otherwise the manifest says so rather than guessing.
+    profile=${profile_id:-unknown}
+    panel=${touch_panel:-unknown}
+    root_bytes=null
+    userdata_hash=null
+    image_set='["fedora_boot.img"]'
+fi
+jq -n --arg profile "$profile" --arg release "$release" \
     --arg build_platform "$build_platform" \
-    --arg panel "$(cat "$rootfs/TOUCH-PANEL")" \
+    --arg panel "$panel" \
     --arg boot "$(sha256sum "$output/fedora_boot.img" | cut -d ' ' -f1)" \
-    --arg userdata "$(sha256sum "$output/userdata.img" | cut -d ' ' -f1)" \
-    --arg stock "$stock_hash" --argjson root_bytes "$(stat -c %s "$rootfs/userdata.raw.img")" \
+    --arg userdata "$userdata_hash" \
+    --arg stock "$stock_hash" --argjson root_bytes "$root_bytes" \
+    --argjson image_set "$image_set" \
     --slurpfile header "$output/boot-header.json" \
     '{schema_version:1,device:"uke",distribution:"fedora",release:"44",kernel_release:$release,
       kernel_build_platform:$build_platform,
@@ -126,11 +168,21 @@ jq -n --arg profile "$(cat "$rootfs/PROFILE-ID")" --arg release "$release" \
       experimental_native_o82_36_all_rates:true,
       profile:$profile,experimental_desktop:($profile=="phosh" or $profile=="plasma-mobile"),
       touch_panel:$panel,touch_variants:["tm","csot"],boot_partition:"boot_a",root_partition:"userdata",
+      images:$image_set,
       root_image_logical_bytes:$root_bytes,stock_boot_sha256:$stock,
-      sha256:{boot:$boot,userdata:$userdata},header:$header[0],
+      sha256:{boot:$boot,userdata:(if $userdata == "" then null else $userdata end)},
+      header:$header[0],
       boot_tested:false,hardware_tested:false,device_write_executed:false}' > "$output/manifest.json"
-(cd "$output"; sha256sum fedora_boot.img userdata.img Image boot.config Module.symvers \
-    boot-initramfs.cpio.gz stock-header.json boot-header.json manifest.json PROFILE-ID \
-    TOUCH-PANEL LOCAL-BLOBS.sha256 BUILD-PLATFORM NATIVE-O82-36 \
-    NATIVE-O82-36-RATES NATIVE-O82-36-ALL-RATES > SHA256SUMS)
-printf 'Image pair: %s/fedora_boot.img and %s/userdata.img\n' "$output" "$output"
+
+boot_artifacts=(fedora_boot.img Image boot.config Module.symvers boot-initramfs.cpio.gz \
+    stock-header.json boot-header.json manifest.json BUILD-PLATFORM NATIVE-O82-36 \
+    NATIVE-O82-36-RATES NATIVE-O82-36-ALL-RATES)
+if [[ -n $rootfs ]]; then
+    boot_artifacts+=(userdata.img PROFILE-ID TOUCH-PANEL LOCAL-BLOBS.sha256)
+fi
+(cd "$output"; sha256sum "${boot_artifacts[@]}" > SHA256SUMS)
+if [[ -n $rootfs ]]; then
+    printf 'Image pair: %s/fedora_boot.img and %s/userdata.img\n' "$output" "$output"
+else
+    printf 'Boot image: %s/fedora_boot.img (no rootfs requested)\n' "$output"
+fi

@@ -19,11 +19,21 @@ The image recipes use original Fedora packages, including the standard KDE Plasm
 
 ## Building
 
-For the Xiaomi Pad 7 Fedora 44 release image set, run from the workspace root:
+Three scripts build three different things and share only the kernel build:
 
 ```sh
+# kernel RPMs only - install on a running tablet, boot_a follows automatically
+./uke-fedora-builder/build-rpms.sh --output build/rpms
+
+# boot_a only - skips the rootfs entirely
+./uke-fedora-builder/build-boot-images.sh --profiles kde --output build/boot
+
+# the rootfs and both images
 ./uke-fedora-builder/build-images.sh --cross-kernel --output build/images
 ```
+
+See [build targets](docs/BUILD-TARGETS.md) for what each produces and which
+change needs which one.
 
 On an x86_64 PC, `--cross-kernel` makes Clang compile the ARM64 kernel directly
 on the host CPU instead of compiling it under AArch64 emulation. This usually

@@ -21,6 +21,22 @@ Each rootfs contains both pinned TM and CSOT touch pairs. The daemon reads
 GPIO26 and selects the matching pair before loading firmware. TM was tested on
 the available tablet; CSOT still needs physical validation.
 
+Three scripts build three different things and share only the kernel build:
+
+```sh
+# kernel RPMs only - install on a running tablet, boot_a follows automatically
+./uke-fedora-builder/build-rpms.sh --output build/rpms
+
+# boot_a only - skips the rootfs entirely
+./uke-fedora-builder/build-boot-images.sh --profiles kde --output build/boot
+
+# the rootfs and both images
+./uke-fedora-builder/build-images.sh --profiles kde --output build/images
+```
+
+See [build targets](BUILD-TARGETS.md) for what each one produces, what it
+skips, and how the output reaches the tablet.
+
 Check progress or stop a running build from another terminal:
 
 ```sh

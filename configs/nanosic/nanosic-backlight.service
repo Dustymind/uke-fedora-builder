@@ -1,0 +1,17 @@
+[Unit]
+Description=Xiaomi Focus Keyboard backlight shortcuts
+After=systemd-modules-load.service
+# Only the touchpad SKU has a backlight. The basic SKU has a Caps Lock lamp and
+# nothing else, and the driver still registers the LED class on both, so the
+# hardware is the only reliable signal. Without a backlight the helper would
+# poll /dev/input forever and write to an LED that changes nothing.
+ConditionPathExists=/sys/class/leds/nanosic::kbd_backlight
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/nanosic-backlight
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

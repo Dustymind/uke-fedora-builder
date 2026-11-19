@@ -209,6 +209,13 @@ if [[ ${1:-} == --inside ]]; then
                 install noopenh264 "${common[@]}" "${desktop[@]}"
             if [[ $profile != tty ]]; then
                 printf 'LANG=zh_CN.UTF-8\nLC_TIME=zh_CN.UTF-8\n' > "$root/etc/locale.conf"
+                # The on-screen keyboard offers only the layouts it is told to.
+                # With the list empty it follows LANG, so a zh_CN system shows a
+                # Chinese keyboard and nothing else - not enough to type an
+                # ASCII-only field on the first-boot screen.  Name both.
+                install -d "$root/etc/xdg"
+                printf '[General]\nenabledLocales=en_US,zh_CN\n' \
+                    > "$root/etc/xdg/plasmakeyboardrc"
             fi
             if [[ $display == sddm ]]; then
                 [[ -x $root/usr/libexec/plasma-setup-bootutil &&

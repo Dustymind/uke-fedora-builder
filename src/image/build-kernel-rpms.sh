@@ -53,6 +53,8 @@ source uke-fedora-builder/src/image/package-lock.sh
 dnf=(dnf5 -y --setopt=system_cachedir=/build-cache/dnf --setopt=keepcache=True)
 export UKE_CCACHE=1 CCACHE_DIR=/build-cache/ccache CCACHE_MAXSIZE=10G
 git config --global --add safe.directory /work/senemos-uke-kernel
+git config --global --add safe.directory /work/uke-linux-hardware-support
+git config --global --add safe.directory /work/uke-fedora-builder
 bash uke-fedora-builder/src/image/build-control.sh stage 'Prepare source RPMs'
 kernel_srpm_stamp=$cache_dir/kernel-srpm-$release.stamp
 kernel_key=$( { git -C senemos-uke-kernel rev-parse HEAD

@@ -1,0 +1,19 @@
+[Unit]
+Description=Reset the Nanosic WN8030 MiAuth window
+After=systemd-modules-load.service
+# Only useful when the keyboard is present and the module is loaded.
+ConditionPathExists=/sys/bus/i2c/drivers/nanosic_wn8030/5-004c
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The MCU asks for a token from its own devauth TA; there is no Linux source for
+# one, so the window is reset instead of answered.  See nanosic-rebind.
+Environment=NANOSIC_REBIND_PERIOD=50
+Environment=NANOSIC_REBIND_IDLE=1.5
+ExecStart=/usr/local/sbin/nanosic-rebind
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

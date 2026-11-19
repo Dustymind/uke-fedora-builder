@@ -1,0 +1,126 @@
+#!/usr/bin/python3
+"""Reset the WN8030 MiAuth window by re-binding the I2C driver.
+
+The MCU asks for an MiAuth token (0x24, p[6]=0x64 "repeat request auth") on a
+period of its own and stops reporting keys when the window closes.  The token
+lives in the Android devauth TA backed by RPMB; Linux has no way to produce one,
+so answering is not an option and neither is silence - the window still closes.
+
+A full driver rebind resets that window.  It is not free: the unbind path powers
+the MCU down through both regulators and the bind path runs it through the
+bootrom again, so the keyboard is deaf for roughly a second and any Caps Lock
+state the MCU held is gone.  That is why this is a workaround, not a fix.
+
+Two things this does better than a plain timer:
+
+  * It waits for an idle gap.  Rebinding between keystrokes is invisible;
+    rebinding mid-word drops them.
+  * It records what it did, with timestamps, so the real window length can be
+    measured instead of guessed.  A period shorter than the window costs
+    keystrokes for nothing; longer means the keyboard dies before the reset.
+
+Environment:
+  NANOSIC_REBIND_PERIOD   seconds between resets (default 50)
+  NANOSIC_REBIND_IDLE     required idle gap in seconds (default 1.5)
+"""
+
+import glob
+import os
+import select
+import struct
+import subprocess
+import sys
+import time
+
+DRIVER = "/sys/bus/i2c/drivers/nanosic_wn8030"
+DEVICE = "5-004c"
+PERIOD = float(os.environ.get("NANOSIC_REBIND_PERIOD", "50"))
+IDLE = float(os.environ.get("NANOSIC_REBIND_IDLE", "1.5"))
+
+
+def log(message):
+    print(message, flush=True)
+
+
+def find_keyboard_event():
+    """The event node of the internal keyboard, not the touchpad or the lid."""
+    for name in sorted(glob.glob("/sys/class/input/event*/device/name")):
+        try:
+            with open(name) as handle:
+                if handle.read().strip() == "Xiaomi Keyboard":
+                    return "/dev/input/" + name.split("/")[-3]
+        except OSError:
+            continue
+    return None
+
+
+def rebind():
+    for step in ("unbind", "bind"):
+        try:
+            with open(f"{DRIVER}/{step}", "w") as handle:
+                handle.write(DEVICE)
+        except OSError as exc:
+            log(f"rebind: cannot write {step}: {exc}")
+            return False
+        if step == "unbind":
+            # Let the remove path finish before the bind path starts walking
+            # the same device back up.
+            time.sleep(0.02)
+    return True
+
+
+def main():
+    if not os.path.exists(f"{DRIVER}/{DEVICE}"):
+        log(f"rebind: {DRIVER}/{DEVICE} is absent; nothing to do")
+        return 1
+
+    log(f"rebind: period {PERIOD:.0f}s, idle {IDLE:.1f}s")
+    last_reset = time.monotonic()
+    last_key = last_reset
+
+    while True:
+        event = find_keyboard_event()
+        if event is None:
+            time.sleep(1)
+            continue
+
+        try:
+            handle = os.open(event, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            time.sleep(1)
+            continue
+
+        try:
+            while True:
+                now = time.monotonic()
+                ready, _, _ = select.select([handle], [], [], 0.5)
+                if ready:
+                    data = os.read(handle, 24 * 64)
+                    for offset in range(0, len(data) - 23, 24):
+                        _, _, kind, _, _ = struct.unpack_from("qqHHI", data, offset)
+                        if kind == 1:  # EV_KEY
+                            last_key = now
+
+                if now - last_reset < PERIOD:
+                    continue
+                # Past the period: reset as soon as the user pauses, but never
+                # wait longer than a second window or the MCU may already have
+                # stopped.
+                if now - last_key < IDLE and now - last_reset < PERIOD + 1.0:
+                    continue
+
+                if rebind():
+                    log(f"rebind: reset at {time.monotonic() - last_reset:.1f}s "
+                        f"(idle {now - last_key:.1f}s)")
+                    last_reset = time.monotonic()
+                    break
+        except OSError:
+            pass
+        finally:
+            os.close(handle)
+
+        time.sleep(0.5)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

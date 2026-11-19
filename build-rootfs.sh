@@ -430,7 +430,27 @@ sudo install -Dm755 "$here/configs/nanosic/nanosic-backlight" \
     "$output/root/usr/local/sbin/nanosic-backlight"
 sudo install -Dm644 "$here/configs/nanosic/nanosic-backlight.service" \
     "$output/root/usr/lib/systemd/system/nanosic-backlight.service"
+# The rebind helper resets the MiAuth window the MCU closes on its own.
+#
+# This is a workaround, not a fix, and it is unconditional on purpose.  The
+# driver leaves the handshake alone (mi_auth=0), so nothing answers the MCU's
+# 0x24 request and the window closes; the helper cycles the I2C driver to reset
+# it.  Each cycle powers the MCU down through both regulators and runs it
+# through the bootrom again, so the keyboard is deaf for about a second and the
+# Caps Lock state the MCU held is lost.
+#
+# If a real token provider is ever wired up and the module is loaded with
+# mi_auth=1, this service must be disabled: answering the handshake makes the
+# periodic power cycle both unnecessary and harmful.  There is no condition for
+# that here because mi_auth is a module parameter and this stage cannot see how
+# the module will be loaded at boot.
+sudo install -Dm755 "$here/configs/nanosic/nanosic-rebind" \
+    "$output/root/usr/local/sbin/nanosic-rebind"
+sudo install -Dm644 "$here/configs/nanosic/nanosic-rebind.service" \
+    "$output/root/usr/lib/systemd/system/nanosic-rebind.service"
 sudo install -d "$output/root/etc/systemd/system/multi-user.target.wants"
+sudo ln -sf /usr/lib/systemd/system/nanosic-rebind.service \
+    "$output/root/etc/systemd/system/multi-user.target.wants/nanosic-rebind.service"
 sudo ln -sf /usr/lib/systemd/system/nanosic-backlight.service \
     "$output/root/etc/systemd/system/multi-user.target.wants/nanosic-backlight.service"
 sudo install -d "$output/root/etc/modules-load.d"

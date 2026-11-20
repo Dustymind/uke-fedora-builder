@@ -15,12 +15,13 @@ Two ways to reset it:
                unbind path disables both regulators and the bind path charges
                them again, so the keyboard is deaf for roughly a second.
 
-A rebind is the default, because a pulse resets the MCU without re-running
-probe: the HID devices the driver created at probe keep the descriptor they were
-given then, and if the firmware comes back with a different one the MCU reports
-keys that no longer reach /dev/input.  The write still succeeds, so the helper
-cannot see it.  The pulse is therefore opt-in until it is shown to revive the
-keyboard on hardware - NANOSIC_REBIND_RESET below.
+A rebind is expensive, so the pulse is tried first and the rebind is the
+fallback.  Both leave the MCU running fresh firmware: the driver downloads
+nanosic/MCU_Upgrade.bin after the pulse exactly as it does at probe, and fails
+the write when that download fails, so `auto` falls back instead of leaving the
+chip in its bootrom.  An earlier revision pulsed reset and stopped there - the
+write returned success, the chip stayed in the bootrom, and the keyboard was
+deaf from the first reset on while this log kept printing `soft: reset`.
 
 Two things this does better than a plain timer:
 
@@ -34,14 +35,18 @@ Environment (set by nanosic-rebind.service, overridable with `systemctl edit`,
 which only takes effect after `systemctl restart nanosic-rebind.service`):
   NANOSIC_REBIND_PERIOD   seconds between resets (default 50)
   NANOSIC_REBIND_IDLE     required idle gap in seconds (default 1.5)
-  NANOSIC_REBIND_RESET    rebind (default), soft, or auto
+  NANOSIC_REBIND_RESET    auto (default), rebind, or soft
                           auto uses the pulse and falls back to a rebind when
-                          the write itself fails
+                          the write fails, which is what a driver without the
+                          attribute, a suspended chip or a firmware reload that
+                          did not take looks like
 
 `idle` in a log line is the time since the last key, not the configured gap.  It
 grows while nobody types, and it grows without bound when the keyboard is
-already deaf; the two look the same from here, which is why the mode is printed
-at startup and on every reset.
+already deaf; the two used to look the same, so a keyboard that never came back
+after a reset only showed up as a number going up.  A run with no key events at
+all now says `no key since start`, and three resets in a row with no keys print
+one warning.
 """
 
 import glob
@@ -60,7 +65,7 @@ IDLE = float(os.environ.get("NANOSIC_REBIND_IDLE", "1.5"))
 # is every half second: at 2 Hz a broken sysfs path fills the journal and hammers
 # the I2C bus for nothing.
 RETRY = 5.0
-MODE = os.environ.get("NANOSIC_REBIND_RESET", "rebind").strip().lower()
+MODE = os.environ.get("NANOSIC_REBIND_RESET", "auto").strip().lower()
 
 
 def log(message):
@@ -127,8 +132,11 @@ def main():
 
     log(f"rebind: period {PERIOD:.0f}s, idle {IDLE:.1f}s, reset {MODE}")
     last_reset = time.monotonic()
-    last_key = last_reset
+    last_key = None
     last_attempt = 0.0
+    typed = False
+    keyless = 0
+    warned = False
 
     while True:
         event = find_keyboard_event()
@@ -152,13 +160,15 @@ def main():
                         _, _, kind, _, _ = struct.unpack_from("qqHHI", data, offset)
                         if kind == 1:  # EV_KEY
                             last_key = now
+                            typed = True
 
                 if now - last_reset < PERIOD:
                     continue
                 # Past the period: reset as soon as the user pauses, but never
                 # wait longer than a second window or the MCU may already have
                 # stopped.
-                if now - last_key < IDLE and now - last_reset < PERIOD + 1.0:
+                if (last_key is not None and now - last_key < IDLE
+                        and now - last_reset < PERIOD + 1.0):
                     continue
                 if now - last_attempt < RETRY:
                     continue
@@ -167,9 +177,19 @@ def main():
                 last_attempt = time.monotonic()
                 if how is None:
                     continue
+                gap = ("no key since start" if last_key is None
+                       else f"idle {now - last_key:.1f}s")
                 log(f"{how}: reset at {time.monotonic() - last_reset:.1f}s "
-                    f"(idle {now - last_key:.1f}s)")
+                    f"({gap})")
                 last_reset = time.monotonic()
+
+                keyless = 0 if typed else keyless + 1
+                typed = False
+                if keyless == 3 and not warned:
+                    warned = True
+                    log("rebind: three resets with no key events; if the "
+                        f"keyboard is dead, look at {DRIVER}/{DEVICE}/"
+                        "keyboard_attached")
                 break
         except OSError:
             pass

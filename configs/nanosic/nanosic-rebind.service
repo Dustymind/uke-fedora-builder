@@ -11,9 +11,11 @@ Type=simple
 # one, so the window is reset instead of answered.  See nanosic-rebind.
 Environment=NANOSIC_REBIND_PERIOD=50
 Environment=NANOSIC_REBIND_IDLE=1.5
-# rebind, soft or auto.  A pulse does not re-run probe, so it can leave the MCU
-# reporting keys to HID devices that no longer take them; a rebind cannot.
-Environment=NANOSIC_REBIND_RESET=rebind
+# auto, soft or rebind.  The pulse is tried first because it leaves the HID
+# devices registered; it falls back to a rebind when the driver reports that the
+# pulse or the firmware reload failed.  Both paths reload the firmware, so either
+# way the keyboard is deaf for about as long as the download takes.
+Environment=NANOSIC_REBIND_RESET=auto
 ExecStart=/usr/bin/nanosic-rebind
 Restart=always
 RestartSec=5s

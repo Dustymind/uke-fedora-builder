@@ -9,7 +9,7 @@ ConditionPathExists=/sys/class/leds/nanosic::kbd_backlight
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/nanosic-backlight
+ExecStart=/usr/bin/nanosic-backlight
 Restart=always
 RestartSec=2s
 

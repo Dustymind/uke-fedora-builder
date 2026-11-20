@@ -12,3 +12,17 @@ and build products are kept outside Git.
 
 The older Rawhide `core`, `boot` and `boot-pair` paths are development tools.
 For the Xiaomi Pad 7 release, use the Fedora 44 command in [BUILDING.md](BUILDING.md).
+
+## Where custom image configuration lives
+
+Anything the image needs that a package can own is an RPM, including the
+keyboard firmware, helpers and units, which `packaging/uke-keyboard-support.spec`
+builds from `configs/nanosic/` during the image build. Everything else goes in
+`configs/rootfs/`, which mirrors the target paths (`configs/rootfs/usr/lib/...`
+lands at `/usr/lib/...`); `build-rootfs.sh` copies it inside the container, so
+one actor owns the tree and the SELinux pass sees every file. `configs/rootfs-copr/`
+is applied only when `UKE_COPR` is not 0. `audit-rootfs.sh` walks both trees and
+requires each file to exist, stay a regular file, keep mode 0644 and root
+ownership, and match its source byte for byte, so an edited asset cannot be
+silently dropped. Both the trees and the keyboard package inputs feed
+`BUILD-INPUTS.sha256`, which is what `--resume` compares.

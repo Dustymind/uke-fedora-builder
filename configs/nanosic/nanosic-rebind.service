@@ -11,7 +11,7 @@ Type=simple
 # one, so the window is reset instead of answered.  See nanosic-rebind.
 Environment=NANOSIC_REBIND_PERIOD=50
 Environment=NANOSIC_REBIND_IDLE=1.5
-ExecStart=/usr/local/sbin/nanosic-rebind
+ExecStart=/usr/bin/nanosic-rebind
 Restart=always
 RestartSec=5s
 

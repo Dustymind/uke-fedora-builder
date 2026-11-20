@@ -176,6 +176,9 @@ kernel_out=$BUILD_KERNEL_OUT
 if [[ -s $kernel_out/cross-source.sha256 ]]; then
     amd_image=${amd_image:-$("$here/src/image/ensure-build-image.sh" "$container" linux/amd64)}
 fi
+# build_kernel_rpms keeps its copy local, so resolve the AArch64 tool image
+# here as well; the helper caches the image and only inspects it.
+arm_image=$(bash "$here/src/image/ensure-build-image.sh" "$container" linux/arm64)
 arm_image_id=$("$container" image inspect "$arm_image" --format '{{.Id}}')
 amd_image_id=none
 [[ -z ${amd_image:-} ]] || amd_image_id=$("$container" image inspect "$amd_image" --format '{{.Id}}')
@@ -189,6 +192,10 @@ core_rpm=$workspace/uke-linux-hardware-support/uke-core-meta/build/srpm/rpmbuild
 hardware_rpms=$output/hardware-rpms
 mkdir -p "$hardware_rpms"
 find "$hardware_rpms" -maxdepth 1 -type f -name '*.rpm' -delete
+# The keyboard package has no component repository of its own: its sources are
+# configs/nanosic, so it is built here rather than copied from a build tree.
+bash "$here/src/image/build-keyboard-rpm.sh" \
+    --output "$hardware_rpms" --release "$release" --image "$arm_image" >/dev/null
 cp "$workspace"/uke-linux-hardware-support/uke-sensors/build/rpmbuild/RPMS/aarch64/uke-touchscreen-0.1.0-18.fc44.aarch64.rpm "$hardware_rpms/"
 cp "$workspace"/uke-linux-hardware-support/uke-console-input/build/rpmbuild/RPMS/aarch64/uke-console-input-3.6.0-*.fc44.aarch64.rpm "$hardware_rpms/"
 cp "$workspace"/uke-linux-hardware-support/uke-platform-runtime/build/rpmbuild/RPMS/aarch64/uke-battery-observer-1.1.0-*.fc44.aarch64.rpm "$hardware_rpms/"
@@ -215,6 +222,8 @@ input_hash=$(
         "$here/src/image/assemble-pair-from-tty.sh" \
         "$here/src/image/ext4-labels.cpp" "$here/src/boot-pair/android-sparse.cpp" \
         "$here/src/boot/boot-image.cpp" "$here/configs/firstboot/uke-create-user" \
+        "$here/src/image/build-keyboard-rpm.sh" \
+        "$here/packaging/uke-keyboard-support.spec" \
         "$here/configs/firstboot/uke-create-user.service" \
         "$here/configs/images/uke-persist.fstab" "$here/configs/images/uke-ssc-fedora44.target" \
         "$here/configs/images/uke-zram-generator.conf" \

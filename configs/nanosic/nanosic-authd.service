@@ -5,7 +5,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/nanosic-authd
+ExecStart=/usr/bin/nanosic-authd
 EnvironmentFile=-/etc/nanosic/authd.env
 Restart=always
 RestartSec=2

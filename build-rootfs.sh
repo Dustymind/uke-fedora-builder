@@ -130,7 +130,8 @@ if [[ ${1:-} == --inside ]]; then
         /hardware-rpms/iio-sensor-proxy-3.9-*.fc44.aarch64.rpm \
         /hardware-rpms/uke-ssc-fileservice-2026.09.21-*.fc44.aarch64.rpm \
         /hardware-rpms/uke-fedora${release}-oem-data-3.0.304.0-2.fc${release}.noarch.rpm \
-        /hardware-rpms/uke-vaapi-v4l2-*.fc${release}.aarch64.rpm
+        /hardware-rpms/uke-vaapi-v4l2-*.fc${release}.aarch64.rpm \
+        /hardware-rpms/uke-keyboard-support-1.0.0-*.fc${release}.noarch.rpm
     phase_done hardware-packages
     rpm --root "$root" -q --qf '%{NAME} %{VERSION} %{RELEASE} %{ARCH}\n' \
         uke-touchscreen uke-battery-observer uke-boot-integration | \
@@ -140,17 +141,25 @@ if [[ ${1:-} == --inside ]]; then
              ($1 == "uke-boot-integration" && $2 "-" $3 == boot && $4 == "aarch64") { good++ }
              END { exit good != 3 || NR != 3 }' || die 'Expected three selected Fedora 44 hardware RPMs'
     rpm --root "$root" -q --qf '%{NAME} %{VERSION} %{RELEASE} %{ARCH}\n' \
-        libssc iio-sensor-proxy uke-ssc-fileservice uke-fedora${release}-oem-data | \
+        libssc iio-sensor-proxy uke-ssc-fileservice uke-fedora${release}-oem-data \
+        uke-keyboard-support | \
         awk -v rel="$release" '($1 == "libssc" && $2 == "0.4.4" && $3 ~ /^[1-9][0-9]*\.fc44$/ && $4 == "aarch64") ||
              ($1 == "iio-sensor-proxy" && $2 == "3.9" && $3 ~ /^[1-9][0-9]*\.fc44$/ && $4 == "aarch64") ||
              ($1 == "uke-ssc-fileservice" && $2 == "2026.09.21" && $3 ~ /^[1-9][0-9]*\.fc44$/ && $4 == "aarch64") ||
-             ($1 == "uke-fedora" rel "-oem-data" && $2 == "3.0.304.0" && $3 == "2.fc" rel && $4 == "noarch") { good++ }
-             END { exit good != 4 || NR != 4 }' || die 'Expected Fedora 44 SSC and OEM data RPMs'
+             ($1 == "uke-fedora" rel "-oem-data" && $2 == "3.0.304.0" && $3 == "2.fc" rel && $4 == "noarch") ||
+             ($1 == "uke-keyboard-support" && $2 == "1.0.0" && $3 == "1.fc" rel && $4 == "noarch") { good++ }
+             END { exit good != 5 || NR != 5 }' || die 'Expected Fedora 44 SSC, OEM data and keyboard RPMs'
     rpm --root "$root" -q --qf '%{NAME}\n' uke-vaapi-v4l2 >/dev/null \
         || die 'The VA-API V4L2 driver is missing from the image'
     fi
+    # The keyboard helpers are enabled here rather than by a preset or a
+    # scriptlet, so the symlinks are part of the audited tree.  authd stays out
+    # on purpose: with no token source it can only answer the MCU's handshake
+    # with a zero token, which makes the MCU stop scanning keys after a few
+    # minutes.  The driver leaves the handshake alone (mi_auth=0).
     systemctl --root="$root" enable uke-touchscreen.service uke-battery.service uke-wifi-factory.service uke-bluetooth-address.service \
-        uke-clock-restore.service uke-clock-save.timer
+        uke-clock-restore.service uke-clock-save.timer \
+        nanosic-rebind.service nanosic-backlight.service
     install -Dm644 /builder/uke-ssc-fedora44.target "$root/usr/lib/systemd/system/uke-ssc-fedora44.target"
     systemctl --root="$root" enable uke-ssc-fedora44.target
     panel=$(cat /workspace/TOUCH-PANEL)
@@ -391,7 +400,7 @@ for entry in 'uke-touchscreen:0.1.0' 'uke-console-input:3.6.0' 'uke-battery-obse
     hardware_files+=("${matches[0]}")
 done
 for entry in 'libssc:0.4.4:aarch64' 'iio-sensor-proxy:3.9:aarch64' \
-             'uke-ssc-fileservice:2026.09.21:aarch64'; do
+             'uke-ssc-fileservice:2026.09.21:aarch64' 'uke-keyboard-support:1.0.0:noarch'; do
     IFS=: read -r package version arch <<< "$entry"
     mapfile -t matches < <(find "$hardware_rpms" -maxdepth 1 -type f -name "$package-$version-*.fc44.$arch.rpm" -print)
     ((${#matches[@]} == 1)) || die "Expected one Fedora 44 $package RPM in $hardware_rpms"
@@ -458,54 +467,6 @@ hwdb_image=$(bash "$here/src/image/ensure-hwdb-image.sh" "$container")
 "$container" run --rm --network=none --security-opt label=disable \
     "${run_label[@]}" -v "$output:/workspace" "$hwdb_image" \
     systemd-hwdb --root=/workspace/root update
-# Assets that live in the builder rather than the umbrella. The Nanosic MCU
-# firmware is loaded by the HID driver at probe time, so a missing file means no
-# keyboard at all.
-sudo install -Dm644 "$here/configs/nanosic/MCU_Upgrade.bin" \
-    "$output/root/usr/lib/firmware/nanosic/MCU_Upgrade.bin"
-sudo install -Dm755 "$here/configs/nanosic/nanosic-authd.py" \
-    "$output/root/usr/local/sbin/nanosic-authd"
-sudo install -Dm644 "$here/configs/nanosic/nanosic-authd.service" \
-    "$output/root/usr/lib/systemd/system/nanosic-authd.service"
-# The auth daemon is installed but deliberately NOT enabled: the token comes
-# from an Android AIDL HAL, and answering the handshake with a zero token makes
-# the MCU stop scanning keys a few minutes after boot. The driver leaves the
-# handshake alone (mi_auth=0), so the daemon has nothing useful to do until a
-# real token source exists.
-#
-# The backlight helper is enabled only when the keyboard actually has a
-# backlight: the touchpad SKU does, the basic SKU has a Caps Lock lamp and
-# nothing else. The unit carries ConditionPathExists for the same reason.
-sudo install -Dm755 "$here/configs/nanosic/nanosic-backlight" \
-    "$output/root/usr/local/sbin/nanosic-backlight"
-sudo install -Dm644 "$here/configs/nanosic/nanosic-backlight.service" \
-    "$output/root/usr/lib/systemd/system/nanosic-backlight.service"
-# The rebind helper resets the MiAuth window the MCU closes on its own.
-#
-# This is a workaround, not a fix, and it is unconditional on purpose.  The
-# driver leaves the handshake alone (mi_auth=0), so nothing answers the MCU's
-# 0x24 request and the window closes; the helper cycles the I2C driver to reset
-# it.  Each cycle powers the MCU down through both regulators and runs it
-# through the bootrom again, so the keyboard is deaf for about a second and the
-# Caps Lock state the MCU held is lost.
-#
-# If a real token provider is ever wired up and the module is loaded with
-# mi_auth=1, this service must be disabled: answering the handshake makes the
-# periodic power cycle both unnecessary and harmful.  There is no condition for
-# that here because mi_auth is a module parameter and this stage cannot see how
-# the module will be loaded at boot.
-sudo install -Dm755 "$here/configs/nanosic/nanosic-rebind" \
-    "$output/root/usr/local/sbin/nanosic-rebind"
-sudo install -Dm644 "$here/configs/nanosic/nanosic-rebind.service" \
-    "$output/root/usr/lib/systemd/system/nanosic-rebind.service"
-sudo install -d "$output/root/etc/systemd/system/multi-user.target.wants"
-sudo ln -sf /usr/lib/systemd/system/nanosic-rebind.service \
-    "$output/root/etc/systemd/system/multi-user.target.wants/nanosic-rebind.service"
-sudo ln -sf /usr/lib/systemd/system/nanosic-backlight.service \
-    "$output/root/etc/systemd/system/multi-user.target.wants/nanosic-backlight.service"
-sudo install -d "$output/root/etc/modules-load.d"
-printf '%s\n' hid-nanosic-wn8030 | \
-    sudo tee "$output/root/etc/modules-load.d/nanosic.conf" >/dev/null
 "$container" run --rm --network=none --security-opt label=disable \
     "${run_label[@]}" -v "$output:/workspace" \
     -v "$here/src/image/finalize-rootfs.sh:/builder/finalize.sh:ro" \

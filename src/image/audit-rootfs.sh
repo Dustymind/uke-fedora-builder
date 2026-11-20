@@ -86,7 +86,7 @@ done
 [[ $overlay_count -gt 0 ]] || fail 'no overlay files were verified'
 [[ -f $root/var/lib/uke-vaapi/v4l2_drv_video.so &&
    ! -L $root/var/lib/uke-vaapi/v4l2_drv_video.so ]] || fail 'VA-API driver copy is missing'
-[[ $(readlink $root/var/lib/uke-vaapi/msm_drv_video.so) == v4l2_drv_video.so ]] \
+[[ $(readlink "$root/var/lib/uke-vaapi/msm_drv_video.so") == v4l2_drv_video.so ]] \
     || fail 'VA-API driver alias is missing'
 cmp -s "$root/usr/lib64/dri/v4l2_drv_video.so" "$root/var/lib/uke-vaapi/v4l2_drv_video.so" \
     || fail 'VA-API driver copy differs from the packaged driver'
@@ -96,6 +96,30 @@ cmp -s "$root/usr/lib64/dri/v4l2_drv_video.so" "$root/var/lib/uke-vaapi/v4l2_drv
 [[ -z $(find "$root/etc/ssh" -maxdepth 1 -name 'ssh_host_*' -print -quit 2>/dev/null) ]] \
     || fail 'SSH host keys are present in the image'
 [[ ! -e $root/var/lib/systemd/random-seed ]] || fail 'random-seed is present in the image'
+
+# The keyboard support package replaced seven loose files.  A missing firmware
+# file is not a degraded keyboard, it is no keyboard: the HID driver requests
+# it during probe and fails the probe when the request fails.
+grep -Eq '^uke-keyboard-support[[:space:]]' "$output/packages.tsv" \
+    || fail 'keyboard support RPM is absent from the inventory'
+[[ -f $root/usr/lib/firmware/nanosic/MCU_Upgrade.bin &&
+   ! -L $root/usr/lib/firmware/nanosic/MCU_Upgrade.bin ]] || fail 'keyboard firmware is missing'
+for helper in nanosic-authd nanosic-backlight nanosic-rebind; do
+    [[ -x $root/usr/bin/$helper && ! -L $root/usr/bin/$helper ]] || fail "keyboard helper is missing: $helper"
+done
+grep -Fxq hid-nanosic-wn8030 "$root/usr/lib/modules-load.d/nanosic.conf" 2>/dev/null \
+    || fail 'the keyboard module is not loaded at boot'
+for unit in nanosic-authd nanosic-backlight nanosic-rebind; do
+    [[ -s $root/usr/lib/systemd/system/$unit.service ]] || fail "keyboard unit is missing: $unit"
+done
+for unit in nanosic-rebind nanosic-backlight; do
+    [[ -L $root/etc/systemd/system/multi-user.target.wants/$unit.service ]] \
+        || fail "keyboard helper is not enabled: $unit"
+done
+[[ ! -e $root/etc/systemd/system/multi-user.target.wants/nanosic-authd.service ]] \
+    || fail 'the auth daemon must stay disabled without a token source'
+[[ -z $(find "$root/usr/local/sbin" -maxdepth 1 -name 'nanosic-*' -print -quit 2>/dev/null) ]] \
+    || fail 'a keyboard helper is still installed under /usr/local/sbin'
 case $profile in
     tty)
         grep -Eq '^uke-console-input[[:space:]]' "$output/packages.tsv" || fail 'TTY keyboard RPM is absent from inventory'

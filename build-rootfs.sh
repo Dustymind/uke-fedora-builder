@@ -87,11 +87,20 @@ if [[ ${1:-} == --inside ]]; then
         cp -a --reflink=auto /base-root/. "$root/"
         phase_done shared-tty-base-copy
     else
+    # @core is Fedora's own answer to "what does every install need", and it
+    # carries what the hand-written list kept missing: procps-ng, iputils,
+    # iproute, man-db, less, plus the group defaults (firewalld, plymouth,
+    # dnf5-plugins).  @networkmanager-submodules adds the Wi-Fi, Bluetooth and
+    # WWAN back ends here rather than in the desktop branch, because the TTY
+    # image is built first and the desktops copy it: a back end added later
+    # would leave TTY without Wi-Fi.  systemd-pam stays explicit - the
+    # authselect repair below owns the PAM stack, and the group does not pull
+    # systemd-pam with weak dependencies off.
     dnf_install_with_download_retry -y --use-host-config --setopt=system_cachedir=$dnf_cache --setopt=keepcache=True --installroot="$root" --releasever=44 \
         --setopt=install_weak_deps=False --setopt=localpkg_gpgcheck=False install \
-        fedora-release basesystem bash coreutils systemd systemd-pam systemd-udev \
-        NetworkManager dnf5 sudo shadow-utils util-linux kmod python3 \
-        e2fsprogs selinux-policy-targeted zram-generator \
+        @core @networkmanager-submodules \
+        fedora-release NetworkManager systemd-pam kmod python3 \
+        zram-generator \
         /kernel-rpms/senemos-uke-linux-kernel-mainline-core-*.rpm \
         /kernel-rpms/senemos-uke-linux-kernel-mainline-modules-*.rpm \
         /kernel-rpms/senemos-uke-linux-kernel-mainline-dtbs-*.rpm \
@@ -182,27 +191,46 @@ if [[ ${1:-} == --inside ]]; then
             systemctl --root="$root" disable uke-create-user.service
             rm -f "$root/usr/lib/systemd/system/uke-create-user.service" \
                 "$root/usr/libexec/uke-create-user"
-            common=(NetworkManager-wifi bluez dbus-daemon mesa-dri-drivers pipewire wireplumber upower
+            # The desktop sets come from Fedora's comps groups so that a stale
+            # hand-written list cannot silently drop a component again.  Only
+            # what the groups do not carry stays named here: the applications
+            # (firefox, kate, kcalc), the pieces Uke configures itself
+            # (plasma-keyboard, powerdevil), and the VM stack the KDE profile
+            # ships.  @multimedia brings alsa-ucm and pipewire-pulseaudio,
+            # which the plain pipewire/wireplumber pair never did.
+            common=(@multimedia qt6-qttranslations dbus-daemon mesa-dri-drivers upower
                     polkit udisks2 xorg-x11-server-Xwayland glibc-langpack-zh langpacks-zh_CN
                     google-noto-sans-cjk-fonts)
             case $profile in
-                kde) desktop=(plasma-desktop plasma-workspace kwin sddm sddm-breeze plasma-setup
-                              sddm-wayland-plasma konsole dolphin plasma-nm bluedevil
-                              plasma-keyboard plasma-systemsettings kscreen plasma-pa
-                              powerdevil firefox kate plasma-discover ark kcalc
+                # @kde-desktop supplies plasma-desktop, plasma-workspace, kwin,
+                # konsole, dolphin, kscreen, plasma-nm, bluedevil, plasma-pa,
+                # plasma-discover, ark and plasma-setup.  Uke keeps SDDM.
+                kde) desktop=(@kde-desktop sddm sddm-breeze sddm-wayland-plasma
+                              plasma-keyboard powerdevil firefox kate kcalc
                               qemu-system-aarch64 qemu-img libvirt virt-install edk2-aarch64); display=sddm ;;
-                gnome) desktop=(gnome-shell gnome-session-wayland-session gdm gnome-initial-setup gnome-control-center
-                                gnome-settings-daemon gnome-terminal nautilus firefox
-                                gnome-text-editor gnome-software file-roller gnome-calculator); display=gdm ;;
-                phosh) desktop=(phosh phoc gdm gnome-initial-setup gnome-shell
-                                gnome-session-wayland-session gnome-settings-daemon phosh-mobile-settings
-                                stevia-phosh-osk-provider gnome-control-center firefox
-                                gnome-text-editor gnome-software file-roller gnome-calculator); display=gdm ;;
-                plasma-mobile) desktop=(plasma-mobile plasma-workspace kwin sddm sddm-breeze plasma-setup
-                                         plasma-settings kscreen plasma-nm bluedevil plasma-keyboard
-                                         plasma-pa powerdevil firefox kate plasma-discover ark kcalc); display=sddm ;;
+                # @gnome-desktop supplies gdm, gnome-initial-setup, the shell,
+                # settings daemon, nautilus, gnome-software, gnome-text-editor,
+                # gnome-calculator and ptyxis as the terminal.
+                gnome) desktop=(@gnome-desktop firefox file-roller); display=gdm ;;
+                # @phosh-desktop is a phone shell: no gdm, no initial setup and
+                # no control centre, so those stay explicit for the gdm path.
+                phosh) desktop=(@phosh-desktop gdm gnome-initial-setup gnome-control-center
+                                gnome-shell gnome-session-wayland-session gnome-settings-daemon
+                                stevia-phosh-osk-provider firefox gnome-text-editor
+                                file-roller); display=gdm ;;
+                plasma-mobile) desktop=(@kde-mobile sddm sddm-breeze sddm-wayland-plasma
+                                         plasma-keyboard powerdevil kscreen plasma-nm
+                                         plasma-pa firefox kate ark kcalc); display=sddm ;;
             esac
+            # plasma-login-manager is the login manager both KDE groups prefer,
+            # and kde-settings-plasmalogin hard-requires it, so the three leave
+            # together whenever Uke keeps SDDM.
+            exclusion=()
+            [[ $display != sddm ]] || exclusion=(--exclude=kde-settings-plasmalogin
+                                                  --exclude=plasma-login-manager
+                                                  --exclude=kcm-plasmalogin)
             dnf_install_with_download_retry -y --use-host-config --disable-repo=fedora-cisco-openh264 \
+                "${exclusion[@]}" \
                 --setopt=system_cachedir=$dnf_cache --setopt=keepcache=True \
                 --setopt=max_parallel_downloads=8 \
                 --installroot="$root" --releasever=44 --setopt=install_weak_deps=False \

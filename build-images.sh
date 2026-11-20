@@ -122,7 +122,7 @@ audit_final() {
     done
     python3 "$here/src/image/audit-build-log.py" "$output/build.log" "$UKE_BUILD_RUN_ID" \
         | tee -a "$output/audit-report.txt" \
-        || die 'Unreviewed package scriptlet error in build log'
+        || die 'A package scriptlet failed during the build'
 }
 if [[ $control == --audit-only ]]; then
     [[ $profiles_seen == 1 && -d $output && ! -L $output && -s $output/BUILD-INPUTS.sha256 ]] \

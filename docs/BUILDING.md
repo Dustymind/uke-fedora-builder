@@ -57,9 +57,9 @@ RPM signature and is reported in the build log.
 
 Before using an image, check that `status.json` says `complete` and read
 `audit-report.txt` beside the images. The builder checks image hashes,
-critical rootfs files and errors reported by package install scripts. It
-rebuilds the udev hardware database with native Fedora 44 tools before making
-each `userdata.img`; an incomplete database fails the audit.
+critical rootfs files and that no package scriptlet failed. It rebuilds the
+udev hardware database with native Fedora 44 tools before making each
+`userdata.img`; an incomplete database fails the audit.
 
 The TTY profile includes an experimental touchscreen keyboard. Its service
 starts only when the framebuffer, touchscreen and uinput devices are present.

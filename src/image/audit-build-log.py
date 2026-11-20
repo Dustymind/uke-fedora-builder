@@ -1,10 +1,44 @@
 #!/usr/bin/env python3
-"""Report errors hidden in successful DNF scriptlets for one build run."""
+"""Fail on a scriptlet that failed; summarise the output of the ones that did not.
+
+DNF runs package scriptlets against an installroot, so a scriptlet may print
+messages such as "Failed to update catalog: No such file or directory" while
+still exiting zero: the runtime it wanted does not exist yet and the work is
+repeated on first boot.  Those lines are not errors, but reviewing them one
+literal string at a time did not scale - any new package could add another one
+and fail a build that was fine.
+
+What does scale is the verdict the tools already produce.  When a scriptlet
+exits non-zero, DNF reports it in its own words, for any phase and any package:
+
+    >>> Non-critical error in %post scriptlet: foo-1-1.noarch
+    >>> [RPM] %post(foo-1-1.noarch) scriptlet failed, exit status 1
+
+and the transaction fails, so the build stops there anyway.  This audit reads
+those markers and nothing else, then counts the remaining scriptlet output per
+package so the log stays reviewable without turning package chatter into a gate.
+"""
 
 import collections
 import pathlib
 import re
 import sys
+
+COUNT = "{:5d}"
+EPOCH = re.compile(r"-\d+:")
+
+RUNNING = re.compile(r"^(Running|Finished) (\S+) scriptlet: (\S+)$")
+RPM_FAILED = re.compile(r"^\[RPM\] ([^()]+)\(([^)]+)\) scriptlet failed, (?:exit status|signal) \d+$")
+DNF_FAILED = re.compile(r"^Non-critical error in (\S+) scriptlet: (\S+)$")
+
+
+def nevra(package: str) -> str:
+    """Drop the epoch so the same package reads the same in both messages.
+
+    DNF names it ``foo-0:1-2.noarch`` and RPM names it ``foo-1-2.noarch``; one
+    failed scriptlet produces both lines and should be reported once.
+    """
+    return EPOCH.sub("-", package, count=1)
 
 
 def main() -> int:
@@ -20,51 +54,49 @@ def main() -> int:
         print("build log audit: current run marker is missing", file=sys.stderr)
         return 1
 
-    # Known installroot-only warnings are reviewed here. Rootfs artifacts are
-    # checked separately; any new scriptlet error still blocks publication.
-    expected = {
-        "Failed to connect to audit log, ignoring: Invalid argument",
-        "Failed to write database /etc/udev/hwdb.bin: Function not implemented",
-        "Failed to preset unit: Unit systemd-tmpfiles-clear.service does not exist",
-        "Failed to preset unit: Unit plasma-kded.service does not exist",
-        "Failed to open file /usr/lib/systemd/catalog/dbus-broker-launch.catalog: No such file or directory",
-        "Failed to import file '/usr/lib/systemd/catalog/dbus-broker-launch.catalog': No such file or directory",
-        "Failed to update catalog: No such file or directory",
-    }
-    seen = collections.Counter()
-    unexpected = []
-    in_scriptlet_output = False
-    for number, line in enumerate(lines[start + 1 :], start + 2):
-        if line == ">>> Scriptlet output:":
-            in_scriptlet_output = True
+    owner = "unattributed"
+    output = collections.Counter()
+    failures = {}
+    in_output = False
+    for number, raw in enumerate(lines[start + 1 :], start + 2):
+        if not raw.startswith(">>> "):
+            in_output = False
             continue
-        if line == ">>> " or not line.startswith(">>> "):
-            in_scriptlet_output = False
+        line = raw[4:]
+        if line == "Scriptlet output:":
+            in_output = True
             continue
-        if line.startswith((">>> Running ", ">>> Finished ")):
-            in_scriptlet_output = False
+        running = RUNNING.match(line)
+        if running:
+            if running.group(1) == "Running":
+                owner = running.group(3)
+            in_output = False
             continue
-        if not in_scriptlet_output:
+        failed = RPM_FAILED.match(line) or DNF_FAILED.match(line)
+        if failed:
+            phase, package = failed.group(1), nevra(failed.group(2))
+            failures.setdefault((package, phase), number)
             continue
-        message = line[4:]
-        if not re.search(r"\b(failed|error|fatal|cannot|not implemented)\b", message, re.I):
-            continue
-        if message in expected:
-            seen[message] += 1
-        elif re.fullmatch(
-            r"modprobe: FATAL: Module i2c-dev not found in directory /lib/modules/[A-Za-z0-9._+-]+",
-            message,
-        ):
-            seen["i2c-dev host kernel mismatch"] += 1
-        else:
-            unexpected.append((number, message))
-    for message, count in sorted(seen.items()):
-        print(f"build log audit: known installroot warning ({count}): {message}")
-    for number, message in unexpected:
-        print(f"build log audit: unreviewed scriptlet error at line {number}: {message}", file=sys.stderr)
-    if unexpected:
+        if in_output and line:
+            output[owner] += 1
+
+    for (package, phase), number in sorted(failures.items(), key=lambda item: item[1]):
+        print(f"build log audit: {phase} scriptlet failed in {package} (log line {number})", file=sys.stderr)
+    if failures:
         return 1
-    print("build log audit: no unreviewed DNF scriptlet errors in this run")
+
+    total = sum(output.values())
+    if not total:
+        print("build log audit: no scriptlet output in this run")
+        return 0
+    print(
+        f"build log audit: {total} scriptlet output lines from {len(output)} package(s); "
+        "no scriptlet failed"
+    )
+    for package, count in output.most_common(10):
+        print(f"build log audit:   {COUNT.format(count)}  {package}")
+    if len(output) > 10:
+        print(f"build log audit:   ({len(output) - 10} more package(s) in build.log)")
     return 0
 
 

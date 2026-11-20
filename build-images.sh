@@ -220,7 +220,7 @@ input_hash=$(
         "$here/src/image/prepare-tool-image.sh" \
         "$lock_file" \
         "$here/src/image/assemble-pair-from-tty.sh" \
-        "$here/src/image/ext4-labels.cpp" "$here/src/boot-pair/android-sparse.cpp" \
+        "$here/src/boot-pair/android-sparse.cpp" \
         "$here/src/boot/boot-image.cpp" "$here/configs/firstboot/uke-create-user" \
         "$here/src/image/build-keyboard-rpm.sh" \
         "$here/packaging/uke-keyboard-support.spec" \

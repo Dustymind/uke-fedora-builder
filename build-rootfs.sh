@@ -215,10 +215,12 @@ if [[ ${1:-} == --inside ]]; then
             # The desktop sets come from Fedora's comps groups so that a stale
             # hand-written list cannot silently drop a component again.  Only
             # what the groups do not carry stays named here: the applications
-            # (firefox, kate, kcalc), the pieces Uke configures itself
-            # (plasma-keyboard, powerdevil), and the VM stack the KDE profile
-            # ships.  @multimedia brings alsa-ucm and pipewire-pulseaudio,
-            # which the plain pipewire/wireplumber pair never did.
+            # (firefox, kate, kcalc) and the pieces Uke configures itself
+            # (plasma-keyboard, powerdevil).  The KDE VM stack is deliberately
+            # absent: Linux runs at EL1 on this SoC, so KVM cannot initialise
+            # and libvirt only ships 42 units that can never start.
+            # @multimedia brings alsa-ucm and pipewire-pulseaudio, which the
+            # plain pipewire/wireplumber pair never did.
             # power-profiles-daemon is only a Recommends of powerdevil, and
             # weak deps are off, so the group never brings it: without it the
             # power panel has no profile to switch.
@@ -231,8 +233,7 @@ if [[ ${1:-} == --inside ]]; then
                 # konsole, dolphin, kscreen, plasma-nm, bluedevil, plasma-pa,
                 # plasma-discover, ark and plasma-setup.  Uke keeps SDDM.
                 kde) desktop=(@kde-desktop sddm sddm-breeze sddm-wayland-plasma
-                              plasma-keyboard powerdevil firefox kate kcalc
-                              qemu-system-aarch64 qemu-img libvirt virt-install edk2-aarch64); display=sddm ;;
+                              plasma-keyboard powerdevil firefox kate kcalc); display=sddm ;;
                 # @gnome-desktop supplies gdm, gnome-initial-setup, the shell,
                 # settings daemon, nautilus, gnome-software, gnome-text-editor,
                 # gnome-calculator and ptyxis as the terminal.
@@ -305,8 +306,8 @@ if [[ ${1:-} == --inside ]]; then
     # Assets that belong to the image but to no package live in configs/rootfs,
     # mirrored by their target path.  They are applied here, not from the host:
     # the container already owns $root, so the mode, the ownership and the
-    # SELinux pass below all see one tree written by one actor.  The COPR repo
-    # is separate because a build without it must not ship the file.
+    # filesystem pass below all see one tree written by one actor.  The COPR
+    # repo is separate because a build without it must not ship the file.
     apply_overlay() {
         local tree=$1 source relative count=0
         [[ -d $tree && ! -L $tree ]] || die "Rootfs overlay is not mounted: $tree"
@@ -353,6 +354,13 @@ if [[ ${1:-} == --inside ]]; then
     cat /builder/uke-persist.fstab >> "$root/etc/fstab"
     install -d -m700 "$root/mnt/vendor/persist"
     install -d -m700 "$root/root"
+    # SELinux is disabled on this device.  The kernel command line carries
+    # selinux=0; this file keeps user space from loading a policy if that
+    # argument is ever dropped, and makes getenforce report Disabled instead
+    # of Permissive.  No labelling pass runs during the build for the same
+    # reason: the labels would never be consulted.
+    install -d -m755 "$root/etc/selinux"
+    printf 'SELINUX=disabled\nSELINUXTYPE=targeted\n' > "$root/etc/selinux/config"
     : > "$root/etc/machine-id"
     mkdir -p "$root/var/lib/dbus"
     rm -f "$root/var/lib/dbus/machine-id"
@@ -468,7 +476,6 @@ base_mount=()
     -v "$blobs:/local-blobs:ro" \
     -v "$core_rpm:/core-rpm/uke-core-meta.rpm:ro" \
     -v "$here/build-rootfs.sh:/builder.sh:ro" \
-    -v "$here/src/image/ext4-labels.cpp:/builder/ext4-labels.cpp:ro" \
     -v "$here/src/boot-pair/android-sparse.cpp:/builder/android-sparse.cpp:ro" \
     -v "$here/configs/firstboot/uke-create-user:/builder/uke-create-user:ro" \
     -v "$here/configs/firstboot/uke-create-user.service:/builder/uke-create-user.service:ro" \
@@ -486,7 +493,6 @@ hwdb_image=$(bash "$here/src/image/ensure-hwdb-image.sh" "$container")
 "$container" run --rm --network=none --security-opt label=disable \
     "${run_label[@]}" -v "$output:/workspace" \
     -v "$here/src/image/finalize-rootfs.sh:/builder/finalize.sh:ro" \
-    -v "$here/src/image/ext4-labels.cpp:/builder/ext4-labels.cpp:ro" \
     -v "$here/src/boot-pair/android-sparse.cpp:/builder/android-sparse.cpp:ro" \
     "$hwdb_image" bash /builder/finalize.sh
 bash "$here/src/image/audit-rootfs.sh" "$output"

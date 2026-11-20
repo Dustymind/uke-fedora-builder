@@ -23,6 +23,13 @@ chip in its bootrom.  An earlier revision pulsed reset and stopped there - the
 write returned success, the chip stayed in the bootrom, and the keyboard was
 deaf from the first reset on while this log kept printing `soft: reset`.
 
+`auto` also escalates.  A pulse that the driver reports as successful can still
+leave a deaf keyboard, and the only symptom is that no key ever arrives; two
+pulses in a row with no key event therefore switch the next reset to a rebind,
+which always runs the full probe.  The switch back is the arrival of a key, so an
+idle tablet pays for a rebind per period and an actively used one keeps the
+pulse.  `soft` is left alone: it is the mode that says "never rebind".
+
 Two things this does better than a plain timer:
 
   * It waits for an idle gap.  Rebinding between keystrokes is invisible;
@@ -45,8 +52,7 @@ which only takes effect after `systemctl restart nanosic-rebind.service`):
 grows while nobody types, and it grows without bound when the keyboard is
 already deaf; the two used to look the same, so a keyboard that never came back
 after a reset only showed up as a number going up.  A run with no key events at
-all now says `no key since start`, and three resets in a row with no keys print
-one warning.
+all now says `no key since start`, and a run that gives up on the pulse says so.
 """
 
 import glob
@@ -112,12 +118,13 @@ def rebind():
     return True
 
 
-def reset():
+def reset(force_rebind=False):
     """Reset the window; returns how, or None when nothing could be done."""
-    if MODE == "soft":
-        return "soft" if soft_reset() else None
-    if MODE == "auto" and soft_reset():
-        return "soft"
+    if not force_rebind:
+        if MODE == "soft":
+            return "soft" if soft_reset() else None
+        if MODE == "auto" and soft_reset():
+            return "soft"
     return "rebind" if rebind() else None
 
 
@@ -173,7 +180,11 @@ def main():
                 if now - last_attempt < RETRY:
                     continue
 
-                how = reset()
+                # Two soft resets in a row that produced no key at all: the
+                # MCU is probably not running its firmware, and a rebind is the
+                # only thing that re-runs probe and downloads it again.
+                escalate = MODE == "auto" and keyless >= 2
+                how = reset(force_rebind=escalate)
                 last_attempt = time.monotonic()
                 if how is None:
                     continue
@@ -185,11 +196,10 @@ def main():
 
                 keyless = 0 if typed else keyless + 1
                 typed = False
-                if keyless == 3 and not warned:
+                if MODE == "auto" and keyless == 3 and not warned:
                     warned = True
-                    log("rebind: three resets with no key events; if the "
-                        f"keyboard is dead, look at {DRIVER}/{DEVICE}/"
-                        "keyboard_attached")
+                    log("rebind: three resets without a key; using a full "
+                        "rebind until one arrives")
                 break
         except OSError:
             pass

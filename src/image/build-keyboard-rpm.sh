@@ -77,9 +77,17 @@ install -m644 -- "$builder/packaging/uke-keyboard-support.spec" "$work/topdir/SP
 # build does.  It copies the package out and removes its own scratch tree, so
 # the host's trap can delete the temporary directory even when the container
 # runtime is a rootful one.
+#
+# The build is pinned to the %changelog date instead of the wall clock, and the
+# file mtimes are clamped to it.  Without that the package would differ on every
+# run, HARDWARE-RPMS.sha256 would change with it, and --resume would rebuild a
+# rootfs whose inputs had not moved.
 cat > "$work/run.sh" <<'RUN'
 set -Eeuo pipefail
 rpmbuild -bb --define "_topdir /work/topdir" --define "dist .fc__RELEASE__" \
+    --define "_buildhost uke-builder" \
+    --define "use_source_date_epoch_as_buildtime 1" \
+    --define "clamp_mtime_to_source_date_epoch 1" \
     /work/topdir/SPECS/uke-keyboard-support.spec
 rpm=$(echo /work/topdir/RPMS/noarch/uke-keyboard-support-*.noarch.rpm)
 test -f "$rpm"

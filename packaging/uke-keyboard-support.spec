@@ -66,6 +66,11 @@ install -Dm755 %{SOURCE5} %{buildroot}%{_bindir}/nanosic-rebind
 install -Dm644 %{SOURCE6} %{buildroot}%{_unitdir}/nanosic-rebind.service
 install -Dm644 %{SOURCE7} %{buildroot}%{_modulesloaddir}/nanosic.conf
 install -Dm644 %{SOURCE8} %{buildroot}%{_licensedir}/%{name}/LICENSE
+# rpmbuild derives SOURCE_DATE_EPOCH from the changelog date, but the packaged
+# mtimes still come from the moment %install ran.  A package that changes on
+# every run would change HARDWARE-RPMS.sha256 and make --resume rebuild a rootfs
+# whose inputs had not moved, so pin them to the same instant.
+find %{buildroot} -exec touch -h -d "@${SOURCE_DATE_EPOCH:?}" {} +
 
 %files
 %license %{_licensedir}/%{name}/LICENSE

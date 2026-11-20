@@ -100,6 +100,14 @@ if [[ ${1:-} == --inside ]]; then
     # would leave TTY without Wi-Fi.  systemd-pam stays explicit - the
     # authselect repair below owns the PAM stack, and the group does not pull
     # systemd-pam with weak dependencies off.
+    #
+    # uke-oem-data belongs here rather than in the hardware transaction below.
+    # It is the only package that provides uke-firmware, and
+    # senemos-uke-linux-kernel-mainline-modules requires uke-firmware >=
+    # 3.0.304.0 while uke-core-meta requires the modules.  The three kernel
+    # RPMs, uke-core-meta and uke-oem-data therefore have to be resolved
+    # together; splitting them leaves the first transaction with an
+    # unsatisfiable dependency.
     dnf_install_with_download_retry -y --use-host-config --setopt=system_cachedir=$dnf_cache --setopt=keepcache=True --installroot="$root" --releasever=44 \
         --setopt=install_weak_deps=False --setopt=localpkg_gpgcheck=False install \
         @core @networkmanager-submodules \
@@ -108,7 +116,8 @@ if [[ ${1:-} == --inside ]]; then
         /kernel-rpms/senemos-uke-linux-kernel-mainline-core-*.rpm \
         /kernel-rpms/senemos-uke-linux-kernel-mainline-modules-*.rpm \
         /kernel-rpms/senemos-uke-linux-kernel-mainline-dtbs-*.rpm \
-        /core-rpm/uke-core-meta.rpm
+        /core-rpm/uke-core-meta.rpm \
+        "/hardware-rpms/uke-fedora${release}-oem-data-3.0.304.0-2.fc${release}.noarch.rpm"
     phase_done base-packages
     rpm --root "$root" -q --qf '%{VERSION} %{RELEASE} %{ARCH}\n' \
         senemos-uke-linux-kernel-mainline-core \
@@ -129,7 +138,6 @@ if [[ ${1:-} == --inside ]]; then
         /hardware-rpms/libssc-0.4.4-*.fc44.aarch64.rpm \
         /hardware-rpms/iio-sensor-proxy-3.9-*.fc44.aarch64.rpm \
         /hardware-rpms/uke-ssc-fileservice-2026.09.21-*.fc44.aarch64.rpm \
-        /hardware-rpms/uke-fedora${release}-oem-data-3.0.304.0-2.fc${release}.noarch.rpm \
         /hardware-rpms/uke-vaapi-v4l2-*.fc${release}.aarch64.rpm \
         /hardware-rpms/uke-keyboard-support-1.0.0-*.fc${release}.noarch.rpm
     phase_done hardware-packages

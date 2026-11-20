@@ -67,7 +67,7 @@ done
 
 # The overlay assets belong to the image but to no package, so an audit that
 # only looks at the inventory would accept an image that silently lost them.
-builder_root=$(dirname -- "${BASH_SOURCE[0]}")/../../..
+builder_root=$(dirname -- "${BASH_SOURCE[0]}")/../..
 overlay_trees=("$builder_root/configs/rootfs")
 (( ${UKE_COPR:-1} == 0 )) || overlay_trees+=("$builder_root/configs/rootfs-copr")
 overlay_count=0

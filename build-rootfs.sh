@@ -219,7 +219,11 @@ if [[ ${1:-} == --inside ]]; then
             # (plasma-keyboard, powerdevil), and the VM stack the KDE profile
             # ships.  @multimedia brings alsa-ucm and pipewire-pulseaudio,
             # which the plain pipewire/wireplumber pair never did.
-            common=(@multimedia qt6-qttranslations dbus-daemon mesa-dri-drivers upower
+            # power-profiles-daemon is only a Recommends of powerdevil, and
+            # weak deps are off, so the group never brings it: without it the
+            # power panel has no profile to switch.
+            common=(@multimedia qt6-qttranslations power-profiles-daemon
+                    dbus-daemon mesa-dri-drivers upower
                     polkit udisks2 xorg-x11-server-Xwayland glibc-langpack-zh langpacks-zh_CN
                     google-noto-sans-cjk-fonts)
             case $profile in

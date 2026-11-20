@@ -48,6 +48,14 @@ lost.  If a real token provider is ever wired up and the module is loaded with
 mi_auth=1, the unit must be disabled: answering the handshake makes the
 periodic power cycle both unnecessary and harmful.
 
+The driver also offers a reset pulse that leaves both regulators alone, and the
+helper can use it instead with NANOSIC_REBIND_RESET=soft.  It is not the
+default: the pulse restarts the MCU without re-running probe, so the HID devices
+keep the report descriptor they were created with, and a firmware that comes
+back with a different one leaves the MCU reporting keys into a device nobody
+reads.  The write succeeds either way, which is why the rebind stays the path
+that is known to bring the keyboard back.
+
 The package carries no preset and no scriptlet.  The image builder enables the
 two helpers with "systemctl --root enable" so that the resulting symlinks are
 part of the audited rootfs, not a side effect of an installroot transaction.

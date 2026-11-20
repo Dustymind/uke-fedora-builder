@@ -6,7 +6,7 @@ period of its own and stops reporting keys when the window closes.  The token
 lives in the Android devauth TA backed by RPMB; Linux has no way to produce one,
 so answering is not an option and neither is silence - the window still closes.
 
-Two ways to reset it, and the cheap one is preferred:
+Two ways to reset it:
 
   soft reset   write 1 to the driver's soft_reset attribute.  The driver pulses
                the MCU reset line and waits for the bootrom: about 70 ms, with
@@ -15,8 +15,12 @@ Two ways to reset it, and the cheap one is preferred:
                unbind path disables both regulators and the bind path charges
                them again, so the keyboard is deaf for roughly a second.
 
-The helper uses the soft reset when the attribute exists and falls back to a
-rebind otherwise, so it still works against a kernel that predates it.
+A rebind is the default, because a pulse resets the MCU without re-running
+probe: the HID devices the driver created at probe keep the descriptor they were
+given then, and if the firmware comes back with a different one the MCU reports
+keys that no longer reach /dev/input.  The write still succeeds, so the helper
+cannot see it.  The pulse is therefore opt-in until it is shown to revive the
+keyboard on hardware - NANOSIC_REBIND_RESET below.
 
 Two things this does better than a plain timer:
 
@@ -26,16 +30,24 @@ Two things this does better than a plain timer:
     measured instead of guessed.  A period shorter than the window costs
     keystrokes for nothing; longer means the keyboard dies before the reset.
 
-Environment:
+Environment (set by nanosic-rebind.service, overridable with `systemctl edit`,
+which only takes effect after `systemctl restart nanosic-rebind.service`):
   NANOSIC_REBIND_PERIOD   seconds between resets (default 50)
   NANOSIC_REBIND_IDLE     required idle gap in seconds (default 1.5)
+  NANOSIC_REBIND_RESET    rebind (default), soft, or auto
+                          auto uses the pulse and falls back to a rebind when
+                          the write itself fails
+
+`idle` in a log line is the time since the last key, not the configured gap.  It
+grows while nobody types, and it grows without bound when the keyboard is
+already deaf; the two look the same from here, which is why the mode is printed
+at startup and on every reset.
 """
 
 import glob
 import os
 import select
 import struct
-import subprocess
 import sys
 import time
 
@@ -44,6 +56,11 @@ DEVICE = "5-004c"
 SOFT_RESET = "/sys/bus/i2c/devices/" + DEVICE + "/soft_reset"
 PERIOD = float(os.environ.get("NANOSIC_REBIND_PERIOD", "50"))
 IDLE = float(os.environ.get("NANOSIC_REBIND_IDLE", "1.5"))
+# A failed attempt used to be retried on the next pass of the select loop, which
+# is every half second: at 2 Hz a broken sysfs path fills the journal and hammers
+# the I2C bus for nothing.
+RETRY = 5.0
+MODE = os.environ.get("NANOSIC_REBIND_RESET", "rebind").strip().lower()
 
 
 def log(message):
@@ -67,7 +84,11 @@ def soft_reset():
         with open(SOFT_RESET, "w") as handle:
             handle.write("1")
         return True
-    except OSError:
+    except OSError as exc:
+        # A kernel without the attribute and an SELinux denial used to look
+        # exactly like a successful pulse: this is the only place that says
+        # which one it was.
+        log(f"soft: cannot write {SOFT_RESET}: {exc}")
         return False
 
 
@@ -86,14 +107,28 @@ def rebind():
     return True
 
 
+def reset():
+    """Reset the window; returns how, or None when nothing could be done."""
+    if MODE == "soft":
+        return "soft" if soft_reset() else None
+    if MODE == "auto" and soft_reset():
+        return "soft"
+    return "rebind" if rebind() else None
+
+
 def main():
+    if MODE not in ("rebind", "soft", "auto"):
+        log(f"rebind: NANOSIC_REBIND_RESET={MODE!r} is not "
+            f"rebind, soft or auto")
+        return 2
     if not os.path.exists(f"{DRIVER}/{DEVICE}"):
         log(f"rebind: {DRIVER}/{DEVICE} is absent; nothing to do")
         return 1
 
-    log(f"rebind: period {PERIOD:.0f}s, idle {IDLE:.1f}s")
+    log(f"rebind: period {PERIOD:.0f}s, idle {IDLE:.1f}s, reset {MODE}")
     last_reset = time.monotonic()
     last_key = last_reset
+    last_attempt = 0.0
 
     while True:
         event = find_keyboard_event()
@@ -125,12 +160,12 @@ def main():
                 # stopped.
                 if now - last_key < IDLE and now - last_reset < PERIOD + 1.0:
                     continue
+                if now - last_attempt < RETRY:
+                    continue
 
-                if soft_reset():
-                    how = "soft"
-                elif rebind():
-                    how = "rebind"
-                else:
+                how = reset()
+                last_attempt = time.monotonic()
+                if how is None:
                     continue
                 log(f"{how}: reset at {time.monotonic() - last_reset:.1f}s "
                     f"(idle {now - last_key:.1f}s)")

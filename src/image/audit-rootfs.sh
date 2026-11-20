@@ -64,6 +64,38 @@ for name in tm/normal.bin tm/config.ini csot/normal.bin csot/config.ini referenc
 done
 
 [[ -s $root/etc/fstab ]] && grep -Fq 'PARTLABEL=userdata / ext4 ' "$root/etc/fstab" || fail 'userdata mount is missing'
+
+# The overlay assets belong to the image but to no package, so an audit that
+# only looks at the inventory would accept an image that silently lost them.
+builder_root=$(dirname -- "${BASH_SOURCE[0]}")/../../..
+overlay_trees=("$builder_root/configs/rootfs")
+(( ${UKE_COPR:-1} == 0 )) || overlay_trees+=("$builder_root/configs/rootfs-copr")
+overlay_count=0
+for tree in "${overlay_trees[@]}"; do
+    [[ -d $tree ]] || fail "overlay source is missing: ${tree##*/}"
+    while IFS= read -r -d '' source; do
+        relative=${source#"$tree"/}
+        target=$root/$relative
+        [[ -f $target && ! -L $target ]] || fail "overlay file is missing: $relative"
+        [[ $(stat -c '%a %u' "$target") == '644 0' ]] || fail "overlay mode or owner changed: $relative"
+        [[ $(sha256sum "$target" | cut -d' ' -f1) == "$(sha256sum "$source" | cut -d' ' -f1)" ]] \
+            || fail "overlay content differs: $relative"
+        overlay_count=$((overlay_count + 1))
+    done < <(find "$tree" -type f -print0)
+done
+[[ $overlay_count -gt 0 ]] || fail 'no overlay files were verified'
+[[ -f $root/var/lib/uke-vaapi/v4l2_drv_video.so &&
+   ! -L $root/var/lib/uke-vaapi/v4l2_drv_video.so ]] || fail 'VA-API driver copy is missing'
+[[ $(readlink $root/var/lib/uke-vaapi/msm_drv_video.so) == v4l2_drv_video.so ]] \
+    || fail 'VA-API driver alias is missing'
+cmp -s "$root/usr/lib64/dri/v4l2_drv_video.so" "$root/var/lib/uke-vaapi/v4l2_drv_video.so" \
+    || fail 'VA-API driver copy differs from the packaged driver'
+# Identity is scrubbed per build; a populated machine-id would be shared by
+# every tablet flashed from this image.
+[[ ! -s $root/etc/machine-id ]] || fail 'machine-id was not cleared'
+[[ -z $(find "$root/etc/ssh" -maxdepth 1 -name 'ssh_host_*' -print -quit 2>/dev/null) ]] \
+    || fail 'SSH host keys are present in the image'
+[[ ! -e $root/var/lib/systemd/random-seed ]] || fail 'random-seed is present in the image'
 case $profile in
     tty)
         grep -Eq '^uke-console-input[[:space:]]' "$output/packages.tsv" || fail 'TTY keyboard RPM is absent from inventory'

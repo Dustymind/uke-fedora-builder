@@ -222,6 +222,10 @@ input_hash=$(
         "$blobs/touch/csot/normal.bin" "$blobs/touch/csot/config.ini" \
         "$blobs/touch/reference.bin" "$core_rpm" "$kernel_rpms"/*.rpm "$hardware_rpms"/*.rpm | \
         awk '{print $1}'
+    # The overlay assets are not packages, so nothing else would notice a change
+    # to them, and --resume would hand back a rootfs built from the old bytes.
+    find "$here/configs/rootfs" "$here/configs/rootfs-copr" -type f -print0 | \
+        LC_ALL=C sort -z | xargs -0 -r sha256sum | awk '{print $1}'
   } | sha256sum | cut -d' ' -f1
 )
 reuse_profiles=$resume

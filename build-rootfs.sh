@@ -4,6 +4,9 @@ set -Eeuo pipefail
 # Per-profile cache keeps concurrent dnf installs from sharing one metadata store.
 dnf_cache=/build-cache/dnf${UKE_DNF_CACHE_SUFFIX:+-$UKE_DNF_CACHE_SUFFIX}
 release=${FEDORA_RELEASE:-44}
+# Decided on the host and passed into the container, where the overlay stage
+# copies configs/rootfs-copr.  Nothing sets this to 0 today, but a build that
+# must not ship the repository file needs a way to say so.
 copr=${UKE_COPR:-1}
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -24,6 +27,7 @@ builder never writes a device.
 HELP
 }
 die() { printf 'build-rootfs: %s\n' "$*" >&2; exit 1; }
+case $copr in 0|1) ;; *) die 'UKE_COPR must be 0 or 1';; esac
 
 if [[ ${1:-} == --inside ]]; then
     [[ $# == 1 && -d /workspace && -d /kernel-rpms && -d /hardware-rpms && -d /local-blobs && -f /core-rpm/uke-core-meta.rpm && -f /builder/uke-create-user && -f /builder/uke-create-user.service ]] || die 'Invalid container invocation'
@@ -277,6 +281,30 @@ if [[ ${1:-} == --inside ]]; then
             ;;
         *) die 'Invalid profile in workspace' ;;
     esac
+    # Assets that belong to the image but to no package live in configs/rootfs,
+    # mirrored by their target path.  They are applied here, not from the host:
+    # the container already owns $root, so the mode, the ownership and the
+    # SELinux pass below all see one tree written by one actor.  The COPR repo
+    # is separate because a build without it must not ship the file.
+    apply_overlay() {
+        local tree=$1 source relative count=0
+        [[ -d $tree && ! -L $tree ]] || die "Rootfs overlay is not mounted: $tree"
+        while IFS= read -r -d '' source; do
+            relative=${source#"$tree"/}
+            [[ -f $source && ! -L $source ]] || die "Overlay input is not a regular file: $relative"
+            install -Dm644 -- "$source" "$root/$relative"
+            count=$((count + 1))
+        done < <(find "$tree" -type f -print0)
+        [[ $count -gt 0 ]] || die "Rootfs overlay is empty: $tree"
+    }
+    apply_overlay /rootfs-overlay
+    ((copr == 0)) || apply_overlay /rootfs-copr
+    # Flatpak sandboxes cannot see the host DRI directory, so give them a copy
+    # of the V4L2 VA-API driver under a path the override above can name.
+    vaapi=$root/usr/lib64/dri/v4l2_drv_video.so
+    [[ -f $vaapi && ! -L $vaapi ]] || die 'The VA-API V4L2 driver is missing from the image'
+    install -Dm644 -- "$vaapi" "$root/var/lib/uke-vaapi/v4l2_drv_video.so"
+    ln -sfn v4l2_drv_video.so "$root/var/lib/uke-vaapi/msm_drv_video.so"
     # authselect owns /etc/pam.d/system-auth and /etc/pam.d/password-auth as
     # ghost files: only its posttrans creates them, and that script discards
     # its own errors.  An image built without them still reaches the display
@@ -408,7 +436,7 @@ base_mount=()
 [[ -z $base_rootfs ]] || base_mount=(-v "$base_rootfs/root:/base-root:ro")
 "$container" run --rm --network=host --platform linux/arm64 --security-opt label=disable \
     "${run_label[@]}" \
-    -v "$cache_dir:/build-cache" -e UKE_DNF_CACHE_SUFFIX \
+    -v "$cache_dir:/build-cache" -e UKE_DNF_CACHE_SUFFIX -e "UKE_COPR=$copr" \
     "${base_mount[@]}" \
     -v "$output:/workspace" -v "$rpms:/kernel-rpms:ro" \
     -v "$hardware_rpms:/hardware-rpms:ro" \
@@ -423,29 +451,16 @@ base_mount=()
     -v "$here/configs/images/uke-persist.fstab:/builder/uke-persist.fstab:ro" \
     -v "$here/configs/images/uke-ssc-fedora44.target:/builder/uke-ssc-fedora44.target:ro" \
     -v "$here/configs/images/uke-zram-generator.conf:/builder/uke-zram-generator.conf:ro" \
+    -v "$here/configs/rootfs:/rootfs-overlay:ro" \
+    -v "$here/configs/rootfs-copr:/rootfs-copr:ro" \
     "$arm_image" bash /builder.sh --inside
 hwdb_image=$(bash "$here/src/image/ensure-hwdb-image.sh" "$container")
 "$container" run --rm --network=none --security-opt label=disable \
     "${run_label[@]}" -v "$output:/workspace" "$hwdb_image" \
     systemd-hwdb --root=/workspace/root update
-# Flatpak sandboxes cannot see the host DRI directory, so give them a copy
-# of the V4L2 VA-API driver under a path the override below can name.
-test -f "$output/root/usr/lib64/dri/v4l2_drv_video.so" \
-    || die "uke-vaapi-v4l2 driver is missing from the rootfs"
-sudo install -Dm644 "$output/root/usr/lib64/dri/v4l2_drv_video.so" \
-    "$output/root/var/lib/uke-vaapi/v4l2_drv_video.so"
-sudo ln -sfn v4l2_drv_video.so "$output/root/var/lib/uke-vaapi/msm_drv_video.so"
-sudo install -Dm644 "$here/configs/flatpak/global" \
-    "$output/root/var/lib/flatpak/overrides/global"
 # Assets that live in the builder rather than the umbrella. The Nanosic MCU
 # firmware is loaded by the HID driver at probe time, so a missing file means no
 # keyboard at all.
-sudo install -Dm644 "$here/configs/audio/fs19xx.fsm" \
-    "$output/root/usr/lib/firmware/qcom/uke/audio/fs19xx.fsm"
-sudo install -Dm644 "$here/configs/audio/asound.state" \
-    "$output/root/var/lib/alsa/asound.state"
-sudo install -Dm644 "$here/configs/wireplumber/85-uke-speaker-priority.conf" \
-    "$output/root/usr/share/wireplumber/wireplumber.conf.d/85-uke-speaker-priority.conf"
 sudo install -Dm644 "$here/configs/nanosic/MCU_Upgrade.bin" \
     "$output/root/usr/lib/firmware/nanosic/MCU_Upgrade.bin"
 sudo install -Dm755 "$here/configs/nanosic/nanosic-authd.py" \
@@ -491,9 +506,6 @@ sudo ln -sf /usr/lib/systemd/system/nanosic-backlight.service \
 sudo install -d "$output/root/etc/modules-load.d"
 printf '%s\n' hid-nanosic-wn8030 | \
     sudo tee "$output/root/etc/modules-load.d/nanosic.conf" >/dev/null
-if [[ $copr == 1 ]]; then
-    sudo install -Dm644 "$here/configs/images/uke-copr.repo" "$output/root/etc/yum.repos.d/uke-copr.repo"
-fi
 "$container" run --rm --network=none --security-opt label=disable \
     "${run_label[@]}" -v "$output:/workspace" \
     -v "$here/src/image/finalize-rootfs.sh:/builder/finalize.sh:ro" \

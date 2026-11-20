@@ -302,6 +302,10 @@ if [[ ${1:-} == --inside ]]; then
             relative=${source#"$tree"/}
             [[ -f $source && ! -L $source ]] || die "Overlay input is not a regular file: $relative"
             install -Dm644 -- "$source" "$root/$relative"
+            # Rootless podman maps this process to the invoking user on the
+            # host, so ownership is only observable, and only meaningful, here.
+            [[ $(stat -c '%a %u' "$root/$relative") == '644 0' ]] \
+                || die "Overlay file is not root-owned 0644: $relative"
             count=$((count + 1))
         done < <(find "$tree" -type f -print0)
         [[ $count -gt 0 ]] || die "Rootfs overlay is empty: $tree"

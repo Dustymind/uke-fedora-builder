@@ -77,7 +77,10 @@ for tree in "${overlay_trees[@]}"; do
         relative=${source#"$tree"/}
         target=$root/$relative
         [[ -f $target && ! -L $target ]] || fail "overlay file is missing: $relative"
-        [[ $(stat -c '%a %u' "$target") == '644 0' ]] || fail "overlay mode or owner changed: $relative"
+        # Ownership cannot be checked from here: a rootless container writes the
+        # tree as the invoking user, and only the container sees it as root.  The
+        # mode survives that mapping, so the build asserts 0644 root inside.
+        [[ $(stat -c '%a' "$target") == '644' ]] || fail "overlay mode changed: $relative"
         [[ $(sha256sum "$target" | cut -d' ' -f1) == "$(sha256sum "$source" | cut -d' ' -f1)" ]] \
             || fail "overlay content differs: $relative"
         overlay_count=$((overlay_count + 1))
